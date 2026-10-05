@@ -204,6 +204,9 @@ class ImplementLoop(Loop):
         for iid, desc in pairs:
             self.store.x("INSERT OR IGNORE INTO backlog (item, status, attempts, updated, note) VALUES (?, 'open', 0, ?, ?)",
                          (iid, now, desc))
+            # the backlog command lists open work only: an item it lists again is open again
+            # (a merged step that did not finish it, like a speed target still out of reach)
+            self.store.x("UPDATE backlog SET status = 'open', attempts = 0 WHERE item = ? AND status = 'done'", (iid,))
             self.store.x("UPDATE backlog SET note = ? WHERE item = ? AND NOT item LIKE 'brief: %'", (desc, iid))
         for r in self.store.q("SELECT item FROM backlog WHERE status IN ('open','blocked')"):
             if r["item"] not in current and not r["item"].startswith("brief: "):
