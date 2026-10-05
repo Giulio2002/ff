@@ -337,3 +337,22 @@ def test_config_hot_reload_and_statusline(tmp_path, capsys):
     assert ff(["--config", str(p), "statusline"]) == 0
     line = capsys.readouterr().out.strip()
     assert line.startswith("toy") and "gas_correct ⏳" in line and "\n" not in line, line
+
+
+def test_references_reach_the_optimizer_prompt(tmp_path):
+    repo = make_project(tmp_path, bug=False)
+    ref = tmp_path / "fastlib"
+    ref.mkdir()
+    (ref / "montgomery.go").write_text("// windowed Montgomery\n")
+    p = write_config(tmp_path, repo)
+    import yaml
+    c = yaml.safe_load(p.read_text())
+    c["benchmark"] = {"command": "echo 1", "references": [{"name": "fastlib", "path": str(ref), "paths": ["*.go"],
+                                                         "notes": "Montgomery with 64-bit words"}]}
+    c["roles"]["optimizer"] = {"provider": "fake"}
+    p.write_text(yaml.safe_dump(c))
+    from ff import prompts
+    from ff.config import load
+    cfg = load(p)
+    system, user = prompts.build(cfg, cfg.role("optimizer"), "go", worktree="/w", branch="b", result_file="/r")
+    assert "Montgomery with 64-bit words" in user and str(ref / "montgomery.go") in user

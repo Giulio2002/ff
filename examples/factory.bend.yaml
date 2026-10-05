@@ -39,6 +39,14 @@ benchmark:
   direction: lower
   min_improvement_pct: 2
   repeats: 3
+  # The fastest baseline the benchmark compares against. The optimizer is told to study how it gets
+  # its speed and port the ideas (proved). `ff references` fetches and lists them.
+  references:
+    - name: fastssz
+      repo: https://github.com/ferranbt/fastssz
+      ref: main
+      paths: ["*.go", "spectests/structs_encoding.go"]
+      notes: generated, allocation-free encoders; offsets read once; hashing with SIMD SHA-256
 
 gate:
   host: local                     # or user@buildserver (runs `ff gate-run` there)

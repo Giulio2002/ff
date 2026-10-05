@@ -95,6 +95,8 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("backlog", help="the implementation backlog; `reopen <item|all>` puts blocked items back")
     p.add_argument("action", nargs="?", choices=["reopen"])
     p.add_argument("item", nargs="?")
+    p = sub.add_parser("references", help="fetch and list the benchmark's reference implementations")
+    p.add_argument("--update", action="store_true")
     sub.add_parser("gates")
     sub.add_parser("experiments")
     sub.add_parser("bill", help="tokens and cost per role and model")
@@ -421,6 +423,19 @@ def cmd_backlog(a):
         f.store.event("implement", "reopen", f"backlog reopened: {a.item}")
     for r in f.store.q("SELECT * FROM backlog ORDER BY status, updated"):
         print(f"{r['status']:<8} attempts={r['attempts']} {r['item'][:110]}" + (f"  [{r['run_id']}]" if r["run_id"] else ""))
+
+
+def cmd_references(a):
+    from .references import fetch, files
+    cfg = load(a.config)
+    if not cfg.benchmark.references:
+        print("no references configured (benchmark.references)")
+    for ref in cfg.benchmark.references:
+        loc = fetch(cfg, ref, update=a.update)
+        fs = files(cfg, ref)
+        print(f"{ref.name}: {loc} ({len(fs)} key files)")
+        for f in fs:
+            print(f"  {f}")
 
 
 def cmd_gates(a):

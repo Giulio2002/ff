@@ -59,6 +59,15 @@ def default_prompt(role_name: str) -> str:
     return resources.files("ff.roles").joinpath("generic.md").read_text()
 
 
+def _references(cfg: Config, role: Role) -> str:
+    """Only rendered (and fetched) for prompts that use it."""
+    text = role.prompt or default_prompt(role.name)
+    if "{references}" not in text:
+        return ""
+    from .references import render
+    return render(cfg)
+
+
 class _Safe(dict):
     def __missing__(self, key):
         return "{" + key + "}"
@@ -87,6 +96,7 @@ def build(cfg: Config, role: Role, task: str, *, worktree: str, branch: str, res
         vectors=cfg.commands.get("vectors", "(none)"),
         runtime_tests=cfg.commands.get("runtime_tests", "(none)"),
         benchmark=cfg.benchmark.command, known_limitations=cfg.audit.known_limitations_file,
+        references=_references(cfg, role),
         **(extra or {}))
     if role.subagents:
         vals["subagent_tools"] = SUBAGENT_TOOLS.format_map(vals)

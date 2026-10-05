@@ -115,6 +115,20 @@ class Spec:
 
 
 @dataclass
+class Reference:
+    """The fastest baseline the benchmark compares against, for agents to learn from: a local
+    directory (`path`) or a git repository (`repo`, `ref`) that the factory clones read-only into
+    <state>/references/<name>. `paths` are the key files (globs, relative to it); `notes` say what
+    makes it fast."""
+    name: str
+    path: str = ""
+    repo: str = ""
+    ref: str = ""
+    paths: list[str] = field(default_factory=list)
+    notes: str = ""
+
+
+@dataclass
 class Benchmark:
     command: str = ""
     metric: str = r"([0-9.]+)"     # regex; group 1 is the number
@@ -122,6 +136,7 @@ class Benchmark:
     min_improvement_pct: float = 1.0
     repeats: int = 3
     timeout_minutes: float = 30
+    references: list[Reference] = field(default_factory=list)
 
 
 @dataclass
@@ -263,9 +278,18 @@ def load(path: str | os.PathLike) -> Config:
     _no_extra(spec_raw, set(Spec.__dataclass_fields__), "spec")
     spec = Spec(**spec_raw)
 
-    bench_raw = _take(raw, "benchmark", {}) or {}
+    bench_raw = dict(_take(raw, "benchmark", {}) or {})
     _no_extra(bench_raw, set(Benchmark.__dataclass_fields__), "benchmark")
-    benchmark = Benchmark(**bench_raw)
+    refs = []
+    for i, r in enumerate(bench_raw.pop("references", None) or []):
+        _no_extra(r, set(Reference.__dataclass_fields__), f"benchmark.references[{i}]")
+        if "name" not in r or not (r.get("path") or r.get("repo")):
+            raise ConfigError(f"benchmark.references[{i}] needs a name and a path or a repo")
+        ref = Reference(**r)
+        if ref.path and not os.path.isabs(os.path.expanduser(ref.path)):
+            ref.path = str((base / ref.path).resolve())
+        refs.append(ref)
+    benchmark = Benchmark(**bench_raw, references=refs)
     if benchmark.direction not in ("lower", "higher"):
         raise ConfigError("benchmark.direction must be 'lower' or 'higher'")
 

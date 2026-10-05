@@ -32,6 +32,15 @@ only if the number improves by `min_improvement_pct` *and* every proof, unit tes
 vector still passes; otherwise it's reverted. The history of experiments goes into the
 next optimizer's prompt.
 
+The optimizer learns from the **fastest baseline**: `benchmark.references` names the reference
+implementations the benchmark compares against (a local path or a git repository, its key files,
+and notes on what makes it fast). The factory keeps a read-only copy (`ff references`) and every
+optimizer prompt starts from it: study how the reference gets its speed, then port the idea through
+the generators, proved. Any role's prompt can use the same `{references}` block.
+
+The optimizer may change any code and any proof that is not frozen (helper laws included); frozen
+statements stay as they are.
+
 **Audit.** Each round gets *fresh* auditors that have never seen the code, in three flavors:
 - **mutation:** plant plausible mistakes and see whether a proof complains;
 - **crash:** hostile input through the public API;
