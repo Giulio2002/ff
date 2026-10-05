@@ -93,7 +93,19 @@ class Factory:
             "backlog": backlog,
             "audit_round": dict(rounds[0]) if rounds else None,
             "cost_usd": round(cost, 2),
+            "accounts": self.accounts(),
         }
+
+    def accounts(self) -> list[dict]:
+        now = time.time()
+        out = []
+        for r in self.runner.pool.list():
+            state = "disabled" if r["disabled"] else (
+                f"cooling until {time.strftime('%m-%d %H:%M', time.localtime(r['cooldown_until']))}"
+                if r["cooldown_until"] > now else "ready")
+            out.append({"name": r["name"], "kind": r["kind"], "email": r["email"], "state": state,
+                        "active": r["active"], "runs": r["runs"], "limit_hits": r["limit_hits"]})
+        return out
 
     def run_view(self, run_id: str, tail: int = 4000) -> dict | None:
         r = self.store.run(run_id)

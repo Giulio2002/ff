@@ -209,3 +209,63 @@ def test_api_steers_an_agent_and_the_agent_steers_its_subagent(tmp_path):
     with pytest.raises(urllib.error.HTTPError):
         urllib.request.urlopen(base + "/status", timeout=5)
     srv.shutdown()
+
+
+# ---------------------------------------------------------------- subscription rotation
+
+def test_limit_messages_and_reset_times():
+    from ff.accounts import is_limit, parse_reset
+    now = 1_800_000_000.0
+    assert is_limit("Claude AI usage limit reached|1800003600")
+    assert parse_reset("Claude AI usage limit reached|1800003600", now) == 1800003600
+    assert is_limit("You've hit your usage limit. Upgrade to Pro or try again in 2 hours 13 minutes.")
+    assert parse_reset("You've hit your usage limit. try again in 2 hours 13 minutes.", now) == now + 2 * 3600 + 13 * 60
+    assert parse_reset("5-hour limit reached ∙ resets 3pm", now) is not None
+    assert not is_limit("all 42 tests passed; the rate of change is fine")
+
+
+def test_rotation_moves_the_session_to_the_next_account(tmp_path, monkeypatch):
+    monkeypatch.setenv("FF_AGENTS_HOME", str(tmp_path / "agents"))
+    from ff.accounts import Pool
+    pool = Pool()
+    a, b = pool.add("claude", "acct-a"), pool.add("claude", "acct-b")
+    repo = make_project(tmp_path, bug=False)
+    p = write_config(tmp_path, repo)
+    import yaml
+    c = yaml.safe_load(p.read_text())
+    c["providers"]["claude"] = {"kind": "claude", "binary": str(ROOT / "tests/fake_claude.py")}
+    c["roles"]["worker"] = {"provider": "claude", "timeout_minutes": 2}
+    c["accounts"] = {"strategy": "round_robin"}
+    p.write_text(yaml.safe_dump(c))
+    f = Factory.from_path(p)
+    wt, br = f.ws.create("rot")
+
+    # round robin: two runs land on two different accounts
+    r1 = f.runner.run("worker", "task one", loop="t", worktree=wt, branch=br)
+    r2 = f.runner.run("worker", "task two", loop="t", worktree=wt, branch=br)
+    assert {r1.result["account"], r2.result["account"]} == {"acct-a", "acct-b"}
+
+    # the next account in turn (a) is out of credits: the run moves to b, with its session
+    reset = int(time.time()) + 7200
+    (a / "EXHAUSTED").write_text(str(reset))
+    r3 = f.runner.run("worker", "task three", loop="t", worktree=wt, branch=br)
+    assert r3.status == "done", r3
+    assert r3.result["account"] == "acct-b" and r3.result["resumed"] is True, r3.result
+    assert r3.usage.get("account_switches") == 1
+    row = pool.get("acct-a")
+    assert row["limit_hits"] == 1 and abs(row["cooldown_until"] - reset) < 2
+    assert pool.get("acct-b")["active"] == 0 and row["active"] == 0
+    assert any("continuing on acct-b with the same session" in e["message"] for e in f.store.events())
+
+    # while a cools down, every run goes to b
+    r4 = f.runner.run("worker", "task four", loop="t", worktree=wt, branch=br)
+    assert r4.result["account"] == "acct-b"
+
+    # a provider with its own credentials (GLM) never touches the pool
+    c["providers"]["glm"] = {"kind": "claude", "binary": str(ROOT / "tests/fake_claude.py"),
+                             "env": {"ANTHROPIC_BASE_URL": "http://x", "CLAUDE_CONFIG_DIR": str(tmp_path / "glmcfg")}}
+    c["roles"]["glmworker"] = {"provider": "glm", "timeout_minutes": 2}
+    p.write_text(yaml.safe_dump(c))
+    f2 = Factory.from_path(p)
+    r5 = f2.runner.run("glmworker", "task five", loop="t", worktree=wt, branch=br)
+    assert r5.result["account"] == "glmcfg"

@@ -29,10 +29,48 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import prompts
+from .accounts import Pool, is_limit, parse_reset
 from .config import Config, Provider, Role
 from .store import Store
 
 FINAL = ("done", "blocked", "failed", "timeout", "stopped")
+
+# a provider with any of these in its env brings its own credentials and never uses the account pool
+OWN_CREDENTIALS = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "OPENAI_API_KEY",
+                   "CLAUDE_CONFIG_DIR", "CODEX_HOME")
+
+CONTINUE = ("You were moved to another account after the previous one hit its usage limit. This is the same "
+            "session: continue exactly where you stopped.")
+
+
+def _kill(p: subprocess.Popen) -> None:
+    try:
+        os.killpg(p.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+
+
+def _claude_limit(ev: dict) -> str | None:
+    """A usage-limit report from Claude Code: an error result, or the synthetic assistant message it
+    emits for API errors. Tool output is never inspected (it could quote anything)."""
+    if ev.get("type") == "result" and (ev.get("is_error") or str(ev.get("subtype", "")).startswith("error")):
+        text = str(ev.get("result") or "") + " " + json.dumps(ev.get("errors") or "")
+        return text.strip() if is_limit(text) else None
+    if ev.get("type") == "assistant":
+        msg = ev.get("message") or {}
+        if msg.get("model") == "<synthetic>" or ev.get("error") or msg.get("error"):
+            text = " ".join(c.get("text", "") for c in msg.get("content", []) if isinstance(c, dict))
+            return text.strip() if is_limit(text) else None
+    if ev.get("type") in ("rate_limit_event", "rate_limit") and str(ev.get("status", ev.get("rate_limit_info", ""))).lower() in ("rejected", "exceeded"):
+        return json.dumps(ev)
+    return None
+
+
+def _codex_limit(ev: dict) -> str | None:
+    if ev.get("type") in ("error", "turn.failed"):
+        text = str(ev.get("message") or (ev.get("error") or {}).get("message") or ev)
+        return text if is_limit(text) else None
+    return None
 
 
 @dataclass
@@ -81,6 +119,7 @@ class Runner:
     def __init__(self, cfg: Config, store: Store):
         self.cfg, self.store = cfg, store
         self.slots = threading.BoundedSemaphore(max(1, cfg.limits.max_parallel_agents))
+        self.pool = Pool()
         self.runs_dir = cfg.project.state_dir / "runs"
         self.runs_dir.mkdir(parents=True, exist_ok=True)
 
@@ -181,12 +220,9 @@ class Runner:
                          run_id)
         deadline = time.time() + role.timeout_minutes * 60
         try:
-            if prov.kind == "claude":
-                status, final_text, usage = self._claude(run_id, prov, role, model, system, user, worktree, env,
-                                                         transcript, d, deadline)
-            elif prov.kind == "codex":
-                status, final_text, usage = self._codex(run_id, prov, role, model, system, user, worktree, env,
-                                                        transcript, d, deadline)
+            if prov.kind in ("claude", "codex"):
+                status, final_text, usage = self._rotating(run_id, loop, prov, role, model, system, user, worktree,
+                                                           env, transcript, d, deadline)
             else:
                 status, final_text, usage = self._script(run_id, prov, role, system, user, worktree, env,
                                                          transcript, d, deadline, result_file)
@@ -213,6 +249,72 @@ class Runner:
         self.store.event(loop, "agent-end", f"{role.name} {status}: {summary[:300]}", run_id,
                          cost_usd=usage.get("cost_usd"))
         return RunResult(run_id, status, summary, result, usage, str(transcript))
+
+    # ---- subscription rotation around the Claude Code / Codex launchers
+
+    def _pool_for(self, prov: Provider) -> tuple[str, list[str] | None] | None:
+        """(kind, allowed names) when this provider draws from the account pool, else None."""
+        acc = prov.accounts
+        if acc in (None, "none", False, []):
+            return None
+        if acc == "auto" and any(k in prov.env for k in OWN_CREDENTIALS):
+            return None   # e.g. GLM: its own endpoint and token, never a Claude subscription
+        return prov.kind, (list(acc) if isinstance(acc, list) else None)
+
+    def _rotating(self, run_id, loop, prov: Provider, role: Role, model, system, user, worktree, env, transcript,
+                  d, deadline):
+        launch = self._claude if prov.kind == "claude" else self._codex
+        spec = self._pool_for(prov)
+        acct = None
+        if spec:
+            acct = self.pool.acquire(spec[0], spec[1], strategy=self.cfg.accounts.strategy,
+                                     stop=lambda: self.store.flag(f"stop:{run_id}") == "1",
+                                     on_wait=lambda n, t: self.store.event(
+                                         loop, "accounts-exhausted", f"every {prov.kind} account is cooling down; "
+                                         f"waiting for {n} (until {time.strftime('%H:%M', time.localtime(t))})", run_id))
+        total: dict = {}
+        resume = None
+        switches = 0
+        while True:
+            run_env = dict(env, **(acct.env() if acct else {}))
+            if acct:
+                self.store.run_update(run_id, account=acct.name)
+            info: dict = {}
+            status, final_text, usage = launch(run_id, prov, role, model, system, user, worktree, run_env,
+                                               transcript, d, deadline, resume=resume, info=info)
+            for k, v in usage.items():
+                total[k] = round(total.get(k, 0) + v, 4) if isinstance(v, float) else total.get(k, 0) + v
+            if acct:
+                self.pool.release(acct, usage)
+            if status != "limited":
+                if switches:
+                    total["account_switches"] = switches
+                return status, final_text, total
+            # out of credits: cool this account down, move the session to the next one, resume there
+            reason = info.get("limit", "usage limit")
+            if not acct:
+                self.store.event(loop, "limit", f"{prov.kind} usage limit and no account pool to rotate to: {reason[:200]}",
+                                 run_id)
+                return "failed", final_text or reason, total
+            until = self.pool.cooldown(acct, parse_reset(reason), reason,
+                                       self.cfg.accounts.default_cooldown_minutes * 60)
+            nxt = self.pool.acquire(spec[0], spec[1], strategy=self.cfg.accounts.strategy,
+                                    stop=lambda: self.store.flag(f"stop:{run_id}") == "1",
+                                    on_wait=lambda n, t: self.store.event(
+                                        loop, "accounts-exhausted", f"every {prov.kind} account is cooling down; "
+                                        f"waiting for {n} (until {time.strftime('%H:%M', time.localtime(t))})", run_id))
+            if nxt is None or time.time() > deadline:
+                return "stopped" if nxt is None else "timeout", final_text or reason, total
+            sid = info.get("session_id")
+            resume = sid if sid and self.pool.move_session(acct, nxt, sid) else None
+            switches += 1
+            self.store.event(loop, "account-switch",
+                             f"{acct.name} hit its limit (cooling down until {time.strftime('%m-%d %H:%M', time.localtime(until))}); "
+                             f"continuing on {nxt.name}" + (" with the same session" if resume else " from the worktree"), run_id)
+            if not resume:   # no session to carry over: a fresh agent continues from the worktree
+                user = user + ("\n\n# Note\n\nA previous agent worked on this task in this worktree and was "
+                               "interrupted. Look at `git log` and `git status` first and continue its work.")
+            acct = nxt
 
     def _spawn(self, argv: list[str], cwd: Path, env: dict, d: Path, stdin=subprocess.PIPE) -> subprocess.Popen:
         nice = self.cfg.limits.nice
@@ -242,11 +344,15 @@ class Runner:
 
     # ---- Claude Code (and GLM through Claude Code)
 
-    def _claude(self, run_id, prov: Provider, role: Role, model, system, user, worktree, env, transcript, d, deadline):
+    def _claude(self, run_id, prov: Provider, role: Role, model, system, user, worktree, env, transcript, d, deadline,
+                resume: str | None = None, info: dict | None = None):
+        info = {} if info is None else info
         argv = [prov.binary, "-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
                 "--permission-mode", prov.permission_mode, "--append-system-prompt", system]
         if model:
             argv += ["--model", model]
+        if resume:
+            argv += ["--resume", resume]
         argv += prov.args + role.args
         p = self._spawn(argv, worktree, env, d)
         self.store.run_update(run_id, pid=p.pid)
@@ -281,7 +387,7 @@ class Runner:
                 deliver_pending()
                 time.sleep(2)
 
-        send(user)
+        send(CONTINUE if resume else user)
         self._watchdog(run_id, p, deadline, state)
         threading.Thread(target=poll_inbox, daemon=True).start()
         final_text, usage = "", {}
@@ -294,7 +400,14 @@ class Runner:
                 except json.JSONDecodeError:
                     continue
                 if ev.get("type") == "system" and ev.get("session_id"):
+                    info["session_id"] = ev["session_id"]
                     self.store.run_update(run_id, result={"session_id": ev["session_id"]})
+                limit = _claude_limit(ev)
+                if limit:
+                    info["limit"] = limit
+                    state["killed"] = "limited"
+                    _kill(p)
+                    break
                 if ev.get("type") == "result":
                     final_text = ev.get("result") or final_text
                     u = ev.get("usage") or {}
@@ -313,19 +426,29 @@ class Runner:
         p.wait()
         if state.get("killed"):
             return state["killed"], final_text, usage
+        if p.returncode != 0 and not final_text:
+            err = (d / "stderr.log").read_text(errors="replace")[-3000:] if (d / "stderr.log").exists() else ""
+            if is_limit(err):
+                info["limit"] = err.strip().splitlines()[-1]
+                return "limited", final_text, usage
         return ("exited" if p.returncode == 0 or final_text else "failed"), final_text, usage
 
     # ---- Codex
 
-    def _codex(self, run_id, prov: Provider, role: Role, model, system, user, worktree, env, transcript, d, deadline):
+    def _codex(self, run_id, prov: Provider, role: Role, model, system, user, worktree, env, transcript, d, deadline,
+               resume: str | None = None, info: dict | None = None):
+        info = {} if info is None else info
         last = d / "last_message.txt"
         perm = (["--dangerously-bypass-approvals-and-sandbox"] if prov.sandbox == "danger-full-access"
                 else ["--sandbox", prov.sandbox])
         common = ["--json", "--skip-git-repo-check", "-o", str(last)] + (["-m", model] if model else [])
         argv = [prov.binary, "exec", *common, "-C", str(worktree), *perm, *prov.args, *role.args, "-"]
         usage: dict = {}
-        thread_id = None
+        thread_id = resume
         text = system + "\n\n" + user
+        if resume:
+            argv = [prov.binary, "exec", "resume", resume, *common, *perm, "-"]
+            text = CONTINUE
         status = "exited"
         while True:
             p = self._spawn(argv, worktree, env, d)
@@ -344,7 +467,14 @@ class Runner:
                         continue
                     if ev.get("type") == "thread.started" and ev.get("thread_id"):
                         thread_id = ev["thread_id"]
+                        info["session_id"] = thread_id
                         self.store.run_update(run_id, result={"session_id": thread_id})
+                    limit = _codex_limit(ev)
+                    if limit:
+                        info["limit"] = limit
+                        state["killed"] = "limited"
+                        _kill(p)
+                        break
                     if ev.get("type") == "turn.completed":
                         for k, v in (ev.get("usage") or {}).items():
                             if isinstance(v, (int, float)):
@@ -354,7 +484,12 @@ class Runner:
                 status = state["killed"]
                 break
             if p.returncode != 0:
-                status = "failed"
+                err = (d / "stderr.log").read_text(errors="replace")[-3000:] if (d / "stderr.log").exists() else ""
+                if is_limit(err):
+                    info["limit"] = err.strip().splitlines()[-1]
+                    status = "limited"
+                else:
+                    status = "failed"
                 break
             msgs = self.store.pending(run_id)
             if not msgs or not thread_id or time.time() > deadline:

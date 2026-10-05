@@ -140,6 +140,26 @@ def main(argv: list[str] | None = None) -> int:
     q = ssub.add_parser("status")
     q.add_argument("run", nargs="?")
 
+    p = sub.add_parser("add_login", aliases=["add-login"],
+                       help="add a Claude Code or Codex subscription to the rotation pool (~/.formal-agents)")
+    p.add_argument("kind", choices=["claude", "codex"])
+    p.add_argument("name", nargs="?", help="account name (default: <kind>-<n>)")
+    p.add_argument("--max-parallel", type=int, default=0, help="at most this many agents at once on it (0 = no cap)")
+    p.add_argument("login_args", nargs=argparse.REMAINDER,
+                   help="passed to the CLI's login, after --: e.g. -- --device-auth (codex), -- --email me@x (claude)")
+    p = sub.add_parser("relogin", help="run the login flow again for an existing account")
+    p.add_argument("name")
+    p.add_argument("login_args", nargs=argparse.REMAINDER)
+    p = sub.add_parser("logins", help="the accounts in the rotation pool")
+    p.add_argument("--check", action="store_true", help="ask each CLI whether the login is still valid")
+    p = sub.add_parser("remove_login", aliases=["remove-login"])
+    p.add_argument("name")
+    p.add_argument("--delete", action="store_true", help="also delete its config directory (credentials)")
+    p = sub.add_parser("account", help="enable, disable or cool down an account by hand")
+    p.add_argument("name")
+    p.add_argument("action", choices=["enable", "disable", "cooldown", "clear"])
+    p.add_argument("duration", nargs="?", type=_dur, help="for cooldown, e.g. 2h")
+
     sub.add_parser("chat", help="talk to the coordinator agent")
     p = sub.add_parser("_run-agent")
     p.add_argument("run")
@@ -236,6 +256,8 @@ def cmd_status(a):
     for r in s["running"]:
         print(f"  {r['id']:<36} {r['loop'] or '':<10} {_ago(r['started'])}  {(r['task'] or '').splitlines()[0][:70]}"
               + (f"  (child of {r['parent']})" if r["parent"] else ""))
+    if s.get("accounts"):
+        print("accounts: " + ", ".join(f"{x['name']} ({x['state']})" for x in s["accounts"]))
     for d in s["open_decisions"]:
         print(f"DECISION #{d['id']}: {d['question']} {d['options']}  ->  ff decide {d['id']} <answer>")
 
@@ -255,6 +277,7 @@ def cmd_runs(a):
         u = json.loads(r["usage"] or "{}")
         dur = (r["ended"] or time.time()) - (r["started"] or time.time())
         print(f"{r['id']:<36} {r['status']:<8} {r['loop'] or '':<9} {r['provider']}/{r['model'] or '-'} "
+              f"[{r['account'] or 'default'}] "
               f"{dur / 60:.0f}m ${u.get('cost_usd', 0)}  {(r['summary'] or r['task'] or '').splitlines()[0][:60] if (r['summary'] or r['task']) else ''}")
 
 
@@ -571,6 +594,92 @@ def cmd_chat(a):
         return 1
     cfg.project.state_dir.mkdir(parents=True, exist_ok=True)
     return subprocess.call(argv, cwd=cfg.project.state_dir, env=env)
+
+
+def _strip_dashes(args: list[str]) -> list[str]:
+    return args[1:] if args and args[0] == "--" else args
+
+
+def cmd_add_login(a):
+    from .accounts import Pool, login
+    pool = Pool()
+    name = a.name
+    if not name:
+        n = len(pool.list(a.kind)) + 1
+        while pool.get(f"{a.kind}-{n}"):
+            n += 1
+        name = f"{a.kind}-{n}"
+    try:
+        return login(pool, a.kind, name, _strip_dashes(a.login_args), a.max_parallel)
+    except ValueError as e:
+        print(e, file=sys.stderr)
+        return 1
+
+
+def cmd_relogin(a):
+    import subprocess as sp
+    from .accounts import Account, Pool
+    pool = Pool()
+    r = pool.get(a.name)
+    if not r:
+        print(f"no account named '{a.name}'", file=sys.stderr)
+        return 1
+    acct = Account(r["name"], r["kind"], Path(r["dir"]))
+    argv = (["claude", "auth", "login"] if acct.kind == "claude" else ["codex", "login"]) + _strip_dashes(a.login_args)
+    code = sp.call(argv, env=dict(os.environ, **acct.env()))
+    st = pool.status(a.name)
+    pool.set(a.name, email=st.get("email") or r["email"], plan=st.get("plan") or r["plan"], cooldown_until=0)
+    print("logged in" if st.get("logged_in") else f"not logged in: {st.get('detail', '')}")
+    return 0 if st.get("logged_in") else (code or 1)
+
+
+def cmd_logins(a):
+    from .accounts import Pool
+    pool = Pool()
+    rows = pool.list()
+    if not rows:
+        print(f"no accounts in {pool.root}; add one with `ff add_login claude` or `ff add_login codex`")
+        return
+    now = time.time()
+    print(f"{'name':<16} {'kind':<7} {'email/plan':<34} {'state':<24} {'active':>6} {'runs':>5} {'limits':>6} {'cost':>9}")
+    for r in rows:
+        state = "disabled" if r["disabled"] else (
+            f"cooling until {time.strftime('%m-%d %H:%M', time.localtime(r['cooldown_until']))}"
+            if r["cooldown_until"] > now else "ready")
+        who = " ".join(x for x in (r["email"], r["plan"]) if x) or "-"
+        if a.check:
+            st = pool.status(r["name"])
+            if not st.get("logged_in"):
+                state = "NOT LOGGED IN"
+        print(f"{r['name']:<16} {r['kind']:<7} {who[:34]:<34} {state:<24} {r['active']:>6} {r['runs']:>5} "
+              f"{r['limit_hits']:>6} ${r['cost_usd']:>8.2f}")
+
+
+def cmd_remove_login(a):
+    from .accounts import Pool
+    try:
+        Pool().remove(a.name, a.delete)
+    except ValueError as e:
+        print(e, file=sys.stderr)
+        return 1
+    print(f"removed {a.name}" + (" and its config directory" if a.delete else " (its config directory is kept)"))
+
+
+def cmd_account(a):
+    from .accounts import Pool
+    pool = Pool()
+    if not pool.get(a.name):
+        print(f"no account named '{a.name}'", file=sys.stderr)
+        return 1
+    if a.action == "enable":
+        pool.set(a.name, disabled=0)
+    elif a.action == "disable":
+        pool.set(a.name, disabled=1)
+    elif a.action == "clear":
+        pool.set(a.name, cooldown_until=0, cooldown_reason=None, active=0)
+    else:
+        pool.set(a.name, cooldown_until=time.time() + (a.duration or 3600), cooldown_reason="set by hand")
+    print(f"{a.name}: {a.action}")
 
 
 def cmd__run_agent(a):

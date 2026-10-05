@@ -20,7 +20,7 @@ CREATE TABLE IF NOT EXISTS events (
 CREATE TABLE IF NOT EXISTS runs (
   id TEXT PRIMARY KEY, parent TEXT, loop TEXT, role TEXT, provider TEXT, model TEXT, task TEXT,
   status TEXT, branch TEXT, worktree TEXT, transcript TEXT, attempt INTEGER, started REAL,
-  ended REAL, summary TEXT, result TEXT, usage TEXT, pid INTEGER);
+  ended REAL, summary TEXT, result TEXT, usage TEXT, pid INTEGER, account TEXT);
 CREATE TABLE IF NOT EXISTS gates (
   id INTEGER PRIMARY KEY, run_id TEXT, branch TEXT, commit_sha TEXT, status TEXT, reason TEXT,
   log TEXT, started REAL, ended REAL, durations TEXT);
@@ -50,6 +50,9 @@ class Store:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._local = threading.local()
         self.db.executescript(SCHEMA)
+        cols = {r["name"] for r in self.db.execute("PRAGMA table_info(runs)")}
+        if "account" not in cols:
+            self.db.execute("ALTER TABLE runs ADD COLUMN account TEXT")
 
     @property
     def db(self) -> sqlite3.Connection:

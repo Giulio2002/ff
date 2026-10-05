@@ -44,12 +44,20 @@ gate:
   host: local                     # or user@buildserver (runs `ff gate-run` there)
   cold: true
 
+# Subscription rotation: `ff add_login claude` / `ff add_login codex` put logins in ~/.formal-agents.
+# Claude Code and Codex providers draw from that pool (accounts: auto); when an account runs out of
+# credits the run moves to the next one, with its session, and the account cools down until it resets.
+accounts:
+  strategy: round_robin           # or fill_first: use one subscription until it runs out, then the next
+  default_cooldown_minutes: 60    # when the limit message names no reset time
+
 # The three model families. claude and gpt use their own CLIs (Claude Code, Codex);
 # glm is Claude Code pointed at an Anthropic-compatible GLM endpoint through env vars.
 providers:
   claude:
     kind: claude
     model: claude-opus-5-5
+    # accounts: auto              # auto (default) | none (the CLI's own login) | [names] to rotate among
   claude-fast:
     kind: claude
     model: claude-sonnet-5

@@ -72,6 +72,10 @@ class Provider:
     permission_mode: str = "bypassPermissions"   # claude: agents run unattended in their worktree
     sandbox: str = "danger-full-access"          # codex: the worktree is the sandbox boundary
     command: list[str] = field(default_factory=list)  # script: argv; {prompt_file} {workdir} {result_file}
+    # Subscription rotation (claude/codex): "auto" = use the ~/.formal-agents pool of this kind when it has
+    # accounts (never for a provider that brings its own credentials in env, like GLM); "none" = the CLI's
+    # default login; or a list of account names to rotate among.
+    accounts: Any = "auto"
 
 
 @dataclass
@@ -161,6 +165,12 @@ class AuditLoop:
 
 
 @dataclass
+class Accounts:
+    strategy: str = "round_robin"      # round_robin: least recently used first; fill_first: use one until it runs out
+    default_cooldown_minutes: float = 60  # when a limit message names no reset time
+
+
+@dataclass
 class Limits:
     max_parallel_agents: int = 6
     nice: int = 19
@@ -182,6 +192,7 @@ class Config:
     optimize: OptimizeLoop
     audit: AuditLoop
     limits: Limits
+    accounts: Accounts = field(default_factory=Accounts)
     coordinator: str = "coordinator"
 
     def role(self, name: str) -> Role:
@@ -220,7 +231,7 @@ def load(path: str | os.PathLike) -> Config:
     raw = _expand(yaml.safe_load(path.read_text()) or {})
     base = path.parent
     top = {"project", "commands", "generated", "checker", "spec", "benchmark", "gate", "providers",
-           "roles", "loops", "limits", "coordinator"}
+           "roles", "loops", "limits", "coordinator", "accounts"}
     _no_extra(raw, top, "factory.yaml")
 
     p = _take(raw, "project", required=True, where="factory.yaml")
@@ -321,6 +332,15 @@ def load(path: str | os.PathLike) -> Config:
     lim_raw = _take(raw, "limits", {}) or {}
     _no_extra(lim_raw, set(Limits.__dataclass_fields__), "limits")
 
+    acc_raw = _take(raw, "accounts", {}) or {}
+    _no_extra(acc_raw, set(Accounts.__dataclass_fields__), "accounts")
+    accounts = Accounts(**acc_raw)
+    if accounts.strategy not in ("round_robin", "fill_first"):
+        raise ConfigError("accounts.strategy must be round_robin or fill_first")
+    for prov in providers.values():
+        if not (prov.accounts in ("auto", "none", None, False) or isinstance(prov.accounts, list)):
+            raise ConfigError(f"providers.{prov.name}.accounts must be auto, none or a list of account names")
+
     commands = _take(raw, "commands", {}) or {}
     _no_extra(commands, {"regenerate", "unit_tests", "vectors", "runtime_tests"}, "commands")
 
@@ -328,4 +348,4 @@ def load(path: str | os.PathLike) -> Config:
                   generated=_take(raw, "generated", []) or [], checker=checker, spec=spec,
                   benchmark=benchmark, gate=gate, providers=providers, roles=roles,
                   implement=implement, optimize=optimize, audit=audit, limits=Limits(**lim_raw),
-                  coordinator=coordinator)
+                  accounts=accounts, coordinator=coordinator)

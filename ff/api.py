@@ -14,6 +14,7 @@ Binds to 127.0.0.1 by default.
   POST /runs/<id>/stop  {"cascade"?: true}
   POST /briefs        {"loop", "text"}
   GET  /decisions ;  POST /decisions/<id> {"answer"}
+  GET  /accounts                         the subscription pool: state, cooldowns, runs, limit hits
   POST /loops/<name>/pause ; POST /loops/<name>/resume       (name may be "all")
 """
 from __future__ import annotations
@@ -85,6 +86,8 @@ def make_handler(f: Factory, token: str):
                                         for r in [root] + s.children(parts[1], True)])
             if parts == ["decisions"]:
                 return self._send(200, _rows(s.q("SELECT * FROM decisions WHERE answer IS NULL")))
+            if parts == ["accounts"]:
+                return self._send(200, f.accounts())
             if parts == ["findings"]:
                 return self._send(200, _rows(s.q("SELECT id, round, flavor, title, severity, status FROM findings "
                                                  "ORDER BY id DESC LIMIT 500")))

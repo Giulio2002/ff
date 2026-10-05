@@ -121,6 +121,37 @@ ff subagent status | stop <id>
 Subagents run in the parent's worktree (or `--own-worktree`), on their own provider. They're
 depth-limited (`max_subagent_depth`) and can be steered by their parent or through the API.
 
+## Rotating subscriptions
+
+Keep several Claude and Codex subscriptions in one pool, `~/.formal-agents/`, shared by every factory
+on the machine:
+
+```sh
+ff add_login claude              # runs `claude auth login` in its own CLAUDE_CONFIG_DIR -> account claude-1
+ff add_login claude work-max     # named
+ff add_login codex -- --device-auth   # `codex login --device-auth` in its own CODEX_HOME (headless servers)
+ff logins [--check]              # who is logged in, cooling down, runs, limit hits, spend
+ff relogin <name> | ff remove_login <name> [--delete]
+ff account <name> disable|enable|cooldown 2h|clear
+```
+
+Each account is a separate config directory (`~/.formal-agents/claude/<name>`, `.../codex/<name>`),
+so the CLIs keep their own credentials and sessions apart. Every Claude Code or Codex agent takes an
+account from the pool:
+
+- `round_robin` (default): the least recently used account, so work spreads over every subscription;
+  `fill_first`: one subscription until it runs out, then the next, around the list.
+- When the CLI reports that the account is out of credits, the account cools down until the reset
+  time the message names (or `default_cooldown_minutes`). The agent's session file is copied to the
+  next account and resumed there (`claude --resume`, `codex exec resume`), so the agent keeps its
+  context and carries on. If every account is cooling down, the run waits for the first one back
+  and the coordinator sees an `accounts-exhausted` event.
+- `providers.<name>.accounts`: `auto` (default; the pool when it has accounts of that kind), `none`
+  (the CLI's own login), or a list of names. A provider that brings its own credentials in `env`
+  (GLM's `ANTHROPIC_AUTH_TOKEN`) never uses the pool.
+
+`ff status`, `ff runs` (the `account` column) and `GET /accounts` show which subscription did what.
+
 ## The steering API
 
 `ff run --api 127.0.0.1:8787` (or `ff serve`) starts the HTTP API. Every request needs
