@@ -5,7 +5,8 @@ Deterministic Python, not an agent, so nobody can talk it into a shortcut. For a
   0. the candidate must contain the current main (otherwise the caller rebases and asks again)
   1. cold: a fresh clone of the candidate commit, no caches
   2. the lock file is untouched by the candidate (only the gate writes it)
-  3. regenerate every generated file; the tree must be byte-identical to what was committed
+  3. (workflow: generators) regenerate every generated file; the tree must be byte-identical to
+     what was committed
   4. frozen statements: unchanged, or changed with a recorded, proved strengthening (lock from main)
   5. no forbidden construct; every file checks within its budget; language extras
      (bend --verdict kernel recheck, lean axiom audit)
@@ -47,7 +48,7 @@ class Verdict:
 def verify_tree(cfg: Config, root: Path, lock: dict[str, str], *, regenerate: bool = True,
                 only: list[str] | None = None, run_tests: bool = True, full: bool = True) -> Verdict:
     log = []
-    if regenerate and cfg.commands.get("regenerate"):
+    if regenerate and cfg.project.workflow == "generators" and cfg.commands.get("regenerate"):
         before = git(root, "status", "--porcelain", "--untracked-files=all", check=False)
         code, out, secs, _ = run_cmd(cfg.commands["regenerate"], root, 3600, cfg.limits.nice)
         log.append(f"$ {cfg.commands['regenerate']}  ({secs:.1f}s, exit {code})\n{out[-4000:]}")

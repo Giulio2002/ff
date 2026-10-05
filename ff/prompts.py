@@ -13,8 +13,7 @@ specification says, for every input. Machines produce the code and proofs; a che
 Your working copy: {worktree} (a git worktree on branch {branch}). Work only there.
 
 Rules of the factory (the gate enforces every one of them; breaking one wastes your run):
-- Never hand-edit generated files ({generated}). Change the generators and regenerate with
-  `{regenerate}`. A bug fixed in a generator is fixed for every output at once.
+- {change_rule}
 - Frozen statements (in {frozen}) must not change or be weakened. If one truly has to change,
   the new statement must be at least as strong: add an entry to `{changes_file}` with the key,
   old hash, new hash, a reason, and the name of a proof that the new statement implies the old.
@@ -22,8 +21,8 @@ Rules of the factory (the gate enforces every one of them; breaking one wastes y
 - Every file in {check_files} must pass the checker within {file_budget}s.
   Forbidden anywhere in them: {forbid}.
 - {commit_rule}
-- Before you finish, run `ff check` in your worktree: it regenerates, checks the frozen
-  statements and runs the checker the way the gate will (add `--files a b` to check only some).
+- Before you finish, run `ff check` in your worktree: it {check_does} the way the gate will
+  (add `--files a b` to check only some).
 
 Tools the factory gives you (shell commands):
 - `ff check [--files ...]`            the gate's checks, locally
@@ -59,6 +58,28 @@ def default_prompt(role_name: str) -> str:
     return resources.files("ff.roles").joinpath("generic.md").read_text()
 
 
+def _workflow_words(cfg: Config) -> dict:
+    """The words that depend on how this project is changed: through generators, or directly."""
+    if cfg.project.workflow == "generators":
+        regen = cfg.commands.get("regenerate", "")
+        return dict(
+            change_rule=(f"Never hand-edit generated files ({', '.join(cfg.generated)}). Change the generators and "
+                         f"regenerate with `{regen}`; a bug fixed in a generator is fixed for every output at once."),
+            check_does="regenerates, checks the frozen statements and runs the checker",
+            edit_step=f"Edit a generator (never a generated file), regenerate everything with `{regen}`.",
+            change_path="through the generators",
+            change_rule_short="Change generators, not generated files.",
+            rebuild="regenerate and run the checker")
+    return dict(
+        change_rule="Edit the implementation and the proofs directly; keep shared lemmas in one place rather "
+                    "than copying them, so a fix lands once.",
+        check_does="checks the frozen statements and runs the checker",
+        edit_step="Edit the implementation and its proofs.",
+        change_path="in the code and its proofs",
+        change_rule_short="",
+        rebuild="run the checker")
+
+
 def _references(cfg: Config, role: Role) -> str:
     """Only rendered (and fetched) for prompts that use it."""
     text = role.prompt or default_prompt(role.name)
@@ -86,6 +107,7 @@ def build(cfg: Config, role: Role, task: str, *, worktree: str, branch: str, res
         forbid=", ".join(f"/{p}/" for p in cfg.checker.forbid) or "(nothing)",
         result_file=result_file, result_extra=result_extra,
         subagents=", ".join(role.subagents),
+        **_workflow_words(cfg),
         commit_rule=("Leave your changes in the worktree, uncommitted: your sandbox keeps git's metadata "
                      "read-only, so the factory commits them for you when you finish (your result's summary "
                      "is the commit message). Do not push; do not touch main."

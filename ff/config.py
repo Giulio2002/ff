@@ -57,6 +57,9 @@ class Project:
     remote: str | None = None  # push main here after every green gate when set
     language: str = "bend"
     state_dir: Path = Path()   # runs, worktrees, transcripts, the sqlite store
+    # How agents change the program: "direct" (edit code and proofs) or "generators" (edit generator
+    # scripts; commands.regenerate writes the `generated` files, which nobody edits by hand).
+    workflow: str = "direct"
 
 
 @dataclass
@@ -250,7 +253,7 @@ def load(path: str | os.PathLike) -> Config:
     _no_extra(raw, top, "factory.yaml")
 
     p = _take(raw, "project", required=True, where="factory.yaml")
-    _no_extra(p, {"name", "repo", "main_branch", "remote", "language", "state_dir"}, "project")
+    _no_extra(p, {"name", "repo", "main_branch", "remote", "language", "state_dir", "workflow"}, "project")
     language = _take(p, "language", "bend")
     if language not in LANGUAGES:
         raise ConfigError(f"project.language must be one of {LANGUAGES}, got '{language}'")
@@ -259,8 +262,11 @@ def load(path: str | os.PathLike) -> Config:
     state = Path(_take(p, "state_dir", f"~/.formal-factory/{name}")).expanduser()
     if not state.is_absolute():
         state = (base / state).resolve()
+    workflow = _take(p, "workflow", "direct")
+    if workflow not in ("direct", "generators"):
+        raise ConfigError("project.workflow must be 'direct' or 'generators'")
     project = Project(name=name, repo=repo, main_branch=_take(p, "main_branch", "main"),
-                      remote=_take(p, "remote"), language=language, state_dir=state)
+                      remote=_take(p, "remote"), language=language, state_dir=state, workflow=workflow)
 
     ck = dict(DEFAULT_CHECKERS[language])
     user_ck = _take(raw, "checker", {}) or {}
@@ -367,9 +373,15 @@ def load(path: str | os.PathLike) -> Config:
 
     commands = _take(raw, "commands", {}) or {}
     _no_extra(commands, {"regenerate", "unit_tests", "vectors", "runtime_tests"}, "commands")
+    generated = _take(raw, "generated", []) or []
+    if workflow == "generators" and not (commands.get("regenerate") and generated):
+        raise ConfigError("project.workflow is 'generators': set commands.regenerate and the `generated` globs")
+    if workflow == "direct" and (commands.get("regenerate") or generated):
+        raise ConfigError("commands.regenerate / generated are set but project.workflow is 'direct'; "
+                          "set workflow: generators to use them")
 
     return Config(path=path, project=project, commands=commands,
-                  generated=_take(raw, "generated", []) or [], checker=checker, spec=spec,
+                  generated=generated, checker=checker, spec=spec,
                   benchmark=benchmark, gate=gate, providers=providers, roles=roles,
                   implement=implement, optimize=optimize, audit=audit, limits=Limits(**lim_raw),
                   accounts=accounts, coordinator=coordinator)

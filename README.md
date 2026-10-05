@@ -24,8 +24,10 @@ as a reusable Python package, for **Bend 2** or **Lean 4** targets.
 ## The loops
 
 **Implement.** Pick an open item (a missing law, an unimplemented type) from your backlog
-command. Edit a *generator*, regenerate everything, check, and make sure no frozen
-statement moved. Then the gate. A red gate goes back to the same agent with the gate's log.
+command, change the code and its proofs, check, and make sure no frozen statement moved.
+How agents change the program is your choice, `project.workflow`: `direct` (they edit code
+and proofs) or `generators` (bend-ssz style: they edit generator scripts, `commands.regenerate`
+writes the `generated` files, and the gate rejects any hand edit). Then the gate. A red gate goes back to the same agent with the gate's log.
 
 **Optimize** (autoresearch with a veto). One change, benchmarked on one number. It's kept
 only if the number improves by `min_improvement_pct` *and* every proof, unit test and
@@ -61,8 +63,8 @@ candidate branch:
    resubmitted automatically; real conflicts go back to the agent.
 2. Cold: a fresh clone, no caches.
 3. The lock file is untouched. Only the gate writes it, and it is always read from `main`.
-4. Regenerate everything. The tree must be byte-identical to what was committed, so
-   nobody hand-edits generated files.
+4. With `workflow: generators`: regenerate everything. The tree must be byte-identical to
+   what was committed, so nobody hand-edits generated files.
 5. Frozen statements are unchanged, or the change is recorded in `frozen_changes.yaml`
    with a reason **and the name of a proof that the new statement implies the old**. That
    proof is checked like everything else.

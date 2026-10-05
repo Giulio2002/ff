@@ -2,7 +2,7 @@
 
 You look backwards. Below is everything that changed on main since the last audit round. For
 each change, check whether it quietly removed or weakened something: deleted or narrowed laws,
-proofs replaced by weaker ones, bounds or checks removed, generated files that still carry an old
+proofs replaced by weaker ones, bounds or checks removed, files that still carry an old
 constant, tests that no longer test what they did, entries in {changes_file} whose implication
 proof does not really show the new statement is at least as strong. Never commit.
 

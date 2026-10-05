@@ -114,7 +114,8 @@ class Loop:
                 if v is None:
                     brief = task + "\n\n# Rebase conflict\n\nmain moved and your branch no longer rebases " \
                                    f"cleanly onto {self.cfg.project.main_branch}. Rebase it yourself " \
-                                   f"(`git rebase {self.cfg.project.main_branch}`), resolve, regenerate, commit."
+                                   f"(`git rebase {self.cfg.project.main_branch}`), resolve, " + \
+                                   ("regenerate, " if self.cfg.project.workflow == "generators" else "") + "commit."
                     continue
                 if v.ok:
                     return CycleOutcome(True, "merged", runs, r.summary, r.result)

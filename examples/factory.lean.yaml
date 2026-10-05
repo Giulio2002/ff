@@ -7,6 +7,7 @@ project:
   main_branch: main
   # remote: origin                # push main here after every green gate
   language: lean                  # bend | lean
+  workflow: generators            # generators (agents edit generator scripts) | direct (they edit code and proofs)
   # state_dir: ~/.formal-factory/my-formal-lib
 
 commands:

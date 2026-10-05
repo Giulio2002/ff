@@ -72,7 +72,8 @@ def make_project(tmp: Path, bug: bool = True) -> Path:
 def write_config(tmp: Path, repo: Path, **loops) -> Path:
     fake = ROOT / "tests/fake_agent.py"
     cfg = {
-        "project": {"name": "toy", "repo": str(repo), "language": "bend", "state_dir": str(tmp / "state")},
+        "project": {"name": "toy", "repo": str(repo), "language": "bend", "state_dir": str(tmp / "state"),
+                    "workflow": "generators"},
         "commands": {"regenerate": f"{sys.executable} gen.py"},
         "generated": ["src/*.bend", "proofs/proof.bend"],
         "checker": {"bend": {"binary": BEND or "bend", "args": ["--check-only"], "files": ["proofs/proof.bend"],
@@ -368,3 +369,22 @@ def test_a_restarted_daemon_stops_the_runs_it_left_behind(tmp_path):
     assert p.wait(timeout=10) != 0
     assert f.store.run("implementer-old")["status"] == "stopped"
     assert f.store.q("SELECT status FROM backlog")[0]["status"] == "open"
+
+
+def test_direct_workflow_has_no_generator_rules(tmp_path):
+    repo = make_project(tmp_path, bug=False)
+    p = write_config(tmp_path, repo)
+    import yaml
+    c = yaml.safe_load(p.read_text())
+    c["project"]["workflow"] = "direct"
+    c["commands"].pop("regenerate")
+    c.pop("generated")
+    p.write_text(yaml.safe_dump(c))
+    from ff import prompts
+    cfg = load(p)
+    system, user = prompts.build(cfg, cfg.role("implementer"), "x", worktree="/w", branch="b", result_file="/r")
+    assert "generat" not in (system + user).lower(), [l for l in (system + user).splitlines() if "generat" in l.lower()]
+    c["generated"] = ["src/*"]
+    p.write_text(yaml.safe_dump(c))
+    with pytest.raises(ConfigError):
+        load(p)
