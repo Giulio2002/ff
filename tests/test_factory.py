@@ -291,3 +291,17 @@ def test_an_agent_that_cannot_start_costs_no_attempt(tmp_path):
     item = f.store.q("SELECT * FROM backlog")[0]
     assert item["status"] == "open"
     assert any(e["kind"] == "launch-error" for e in f.store.events())
+
+
+def test_a_clean_exit_without_a_result_file_is_done(tmp_path):
+    repo = make_project(tmp_path, bug=False)
+    p = write_config(tmp_path, repo)
+    import yaml
+    c = yaml.safe_load(p.read_text())
+    c["providers"]["talker"] = {"kind": "script", "command": ["sh", "-c", "cat >/dev/null; echo 'All layers proved; see the branch.'"]}
+    c["roles"]["worker"] = {"provider": "talker", "timeout_minutes": 1}
+    p.write_text(yaml.safe_dump(c))
+    f = Factory.from_path(p)
+    wt, br = f.ws.create("talk")
+    r = f.runner.run("worker", "do it", loop="t", worktree=wt, branch=br)
+    assert r.status == "done" and "All layers proved" in r.summary, r

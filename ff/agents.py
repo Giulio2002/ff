@@ -246,8 +246,12 @@ class Runner:
         if not result:
             result = _last_json_object(final_text or "")
         if status == "exited":
-            status = result.get("status") if result.get("status") in ("done", "blocked") else (
-                "done" if result else "failed")
+            # The agent ended its session normally. Its own verdict wins; with no result file, a final
+            # message still means it finished (whether the work is any good is the gate's call).
+            if result.get("status") in ("done", "blocked"):
+                status = result["status"]
+            else:
+                status = "done" if (result or (final_text or "").strip()) else "failed"
         if launch_error:
             result["launch_error"] = launch_error
         prev = json.loads((self.store.run(run_id) or {"result": None})["result"] or "{}")
