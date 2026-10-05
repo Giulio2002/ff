@@ -320,3 +320,20 @@ def test_backlog_ids_survive_a_reworded_description(tmp_path):
     assert loop.take() == "law:run", "the reworded item is the same item, still running"
     rows = {r["item"]: (r["status"], r["note"]) for r in f.store.q("SELECT * FROM backlog")}
     assert rows["law:gas"] == ("running", "prove gas (new wording)")
+
+
+def test_config_hot_reload_and_statusline(tmp_path, capsys):
+    repo = make_project(tmp_path, bug=False)
+    p = write_config(tmp_path, repo)
+    f = Factory.from_path(p)
+    assert f.cfg.checker.file_timeout_seconds == 120
+    time.sleep(0.01)
+    p.write_text(p.read_text().replace("file_timeout_seconds: 120", "file_timeout_seconds: 60"))
+    os.utime(p, (time.time() + 5, time.time() + 5))
+    assert f.maybe_reload() and f.cfg.checker.file_timeout_seconds == 60
+    assert f.gate.cfg.checker.file_timeout_seconds == 60, "the gate shares the reloaded config"
+    from ff.cli import main as ff
+    f.store.x("INSERT INTO backlog (item, status, attempts, updated) VALUES ('law:gas_correct', 'running', 0, ?)", (time.time(),))
+    assert ff(["--config", str(p), "statusline"]) == 0
+    line = capsys.readouterr().out.strip()
+    assert line.startswith("toy") and "gas_correct ⏳" in line and "\n" not in line, line

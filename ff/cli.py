@@ -163,7 +163,13 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("action", choices=["enable", "disable", "cooldown", "clear"])
     p.add_argument("duration", nargs="?", type=_dur, help="for cooldown, e.g. 2h")
 
-    sub.add_parser("chat", help="talk to the coordinator agent")
+    p = sub.add_parser("chat", help="talk to the coordinator: Claude Code, with the factory's stage at the bottom")
+    p.add_argument("--print", dest="print_", metavar="MESSAGE", help="ask once and print the answer")
+    sub.add_parser("statusline", help="one line: the stage the factory is at (Claude Code's status line)")
+    p = sub.add_parser("digest", help="what happened since the last digest (a hook adds it to each chat message)")
+    p.add_argument("--all", action="store_true", help="every event kind, not only the important ones")
+    p = sub.add_parser("watch", help="stream the important events as they happen (for a Monitor)")
+    p.add_argument("--all", action="store_true")
     p = sub.add_parser("_run-agent")
     p.add_argument("run")
 
@@ -219,6 +225,7 @@ def cmd_run(a):
     signal.signal(signal.SIGTERM, lambda *_: stop.append(1))
     try:
         while not stop and any(t.is_alive() for l in f.loops.values() for t in l.threads):
+            f.maybe_reload()
             time.sleep(5)
     except KeyboardInterrupt:
         pass
@@ -591,8 +598,78 @@ def cmd_subagent(a):
         print("stopping: " + ", ".join(f.runner.stop(a.run)))
 
 
+IMPORTANT = ("gate-green", "gate-red", "agent-end", "launch-error", "error", "item-done", "item-blocked", "note",
+             "decision", "accounts-exhausted", "account-switch", "limit", "experiment-kept", "experiment-reverted",
+             "round-start", "round-end", "findings", "fixed", "fix-failed", "audit-done", "config-reloaded")
+
+
+def _event_line(e) -> str:
+    msg = " ".join((e["message"] or "").split())
+    return f"{time.strftime('%H:%M', time.localtime(e['ts']))} {e['kind']}: {msg[:400]}" + (
+        f" [{e['run_id']}]" if e["run_id"] else "")
+
+
+def cmd_statusline(a):
+    """One short line for the bottom of the chat: contract items, agents, the gate, money, attention."""
+    try:
+        f = _factory(a)
+    except Exception as e:  # the status line must never break the chat
+        print(f"ff: {e}"[:120])
+        return 0
+    st = f.store
+    parts = [f.cfg.project.name]
+    now = time.time()
+    for r in st.q("SELECT item, status, updated FROM backlog WHERE item NOT LIKE 'brief: %' ORDER BY item"):
+        name = r["item"].split("\t")[0].removeprefix("law:")
+        name = name if len(name) <= 24 else name[:22] + "…"
+        mark = {"done": "✓", "running": f"⏳{_ago(r['updated'])}", "blocked": "✗", "open": "·"}.get(r["status"], r["status"])
+        if r["status"] == "done" and now - (r["updated"] or 0) > 86400 * 3:
+            continue
+        parts.append(f"{name} {mark}")
+    running = st.q("SELECT COUNT(*) n FROM runs WHERE status = 'running'")[0]["n"]
+    parts.append(f"{running} agent{'s' if running != 1 else ''}")
+    g = st.q("SELECT id, status FROM gates ORDER BY id DESC LIMIT 1")
+    if g:
+        parts.append(f"gate #{g[0]['id']} {dict(green='✓', red='✗').get(g[0]['status'], '…')}")
+    exp = st.q("SELECT candidate FROM experiments WHERE kept = 1 ORDER BY id DESC LIMIT 1")
+    if exp and exp[0]["candidate"] is not None:
+        parts.append(f"bench {exp[0]['candidate']:g}")
+    cost = st.q("SELECT SUM(json_extract(usage, '$.cost_usd')) c FROM runs")[0]["c"] or 0
+    parts.append(f"${cost:.0f}")
+    attention = st.q("SELECT COUNT(*) n FROM decisions WHERE answer IS NULL")[0]["n"]
+    if attention:
+        parts.append(f"⚠ {attention} decision{'s' if attention > 1 else ''}")
+    if st.flag("paused:all") == "1":
+        parts.append("PAUSED")
+    print(" · ".join(parts))
+
+
+def cmd_digest(a):
+    f = _factory(a)
+    key = "digest:last"
+    last = float(f.store.flag(key) or (time.time() - 3600))
+    rows = [e for e in f.store.events(last, None, 500) if a.all or e["kind"] in IMPORTANT]
+    f.store.set_flag(key, str(time.time()))
+    if rows:
+        print("Factory events since the last message:")
+        for e in rows[-60:]:
+            print("- " + _event_line(e))
+
+
+def cmd_watch(a):
+    f = _factory(a)
+    last = (f.store.q("SELECT MAX(id) m FROM events")[0]["m"] or 0)
+    while True:
+        for e in f.store.q("SELECT * FROM events WHERE id > ? ORDER BY id", (last,)):
+            last = e["id"]
+            if a.all or e["kind"] in IMPORTANT:
+                print(_event_line(e), flush=True)
+        time.sleep(5)
+
+
 def cmd_chat(a):
-    """The coordinator: an interactive agent session in the state directory with the `ff` tools."""
+    """The coordinator: Claude Code (or Codex) in the factory's state directory, with the `ff` tools,
+    the factory's stage in the status line, and the latest events added to every message."""
     from .agents import ff_bin
     from .prompts import _Safe, default_prompt
     cfg = load(a.config)
@@ -602,10 +679,18 @@ def cmd_chat(a):
     env = dict(os.environ, **prov.env, **role.env, FF_CONFIG=str(cfg.path))
     env["PATH"] = str(ff_bin(cfg.project.state_dir)) + os.pathsep + env.get("PATH", "")
     model = cfg.model_for(role)
+    opening = ("Give me a short status report (`ff status`, `ff events --since 2h`), then start watching the "
+               "factory: run `ff watch` with your Monitor tool so its events reach you, and tell me when "
+               "something needs my attention.")
     if prov.kind == "claude":
-        argv = [prov.binary, "--append-system-prompt", text] + (["--model", model] if model else []) + prov.args + role.args
+        settings = {"statusLine": {"type": "command", "command": "ff statusline", "padding": 0},
+                    "hooks": {"UserPromptSubmit": [{"hooks": [{"type": "command", "command": "ff digest"}]}]}}
+        argv = [prov.binary, "--append-system-prompt", text, "--settings", json.dumps(settings)]
+        argv += (["--model", model] if model else []) + prov.args + role.args
+        argv += ["-p", a.print_] if a.print_ else [opening]
     elif prov.kind == "codex":
-        argv = [prov.binary] + (["-m", model] if model else []) + prov.args + role.args + [text + "\n\nStart with `ff status`."]
+        argv = [prov.binary] + (["exec"] if a.print_ else []) + (["-m", model] if model else []) + prov.args + role.args
+        argv += [text + "\n\n" + (a.print_ or opening)]
     else:
         print("the coordinator needs a claude or codex provider", file=sys.stderr)
         return 1

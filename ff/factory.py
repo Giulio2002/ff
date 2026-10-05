@@ -25,6 +25,30 @@ class Factory:
         self.loops: dict = {}
         self._view_lock = threading.Lock()
         self._view_locks: dict = {}
+        self.maybe_reload()   # remembers the file's mtime
+
+    def maybe_reload(self) -> bool:
+        """Re-read the YAML when it changed. The Config object is shared by the runner, the gate and
+        the loops, so it is updated in place: budgets, commands, models, prompts and timeouts apply
+        to the next run and the next gate. (Worker counts and max_parallel_agents need a restart.)"""
+        try:
+            mtime = self.cfg.path.stat().st_mtime
+        except OSError:
+            return False
+        if mtime == getattr(self, "_cfg_mtime", None):
+            return False
+        first = getattr(self, "_cfg_mtime", None) is None
+        self._cfg_mtime = mtime
+        if first:
+            return False
+        try:
+            new = load(self.cfg.path)
+        except Exception as e:
+            self.store.event("factory", "error", f"factory.yaml changed but does not load; keeping the old one: {e}")
+            return False
+        self.cfg.__dict__.update(new.__dict__)
+        self.store.event("factory", "config-reloaded", "factory.yaml reloaded")
+        return True
 
     @classmethod
     def from_path(cls, path) -> "Factory":
