@@ -702,6 +702,14 @@ def cmd_account(a):
 def cmd__run_agent(a):
     f = _factory(a)
     r = f.runner.execute_queued(a.run)
+    # A detached run in a worktree of its own (ad-hoc agents, `--own-worktree` subagents): remove the
+    # worktree when it ends; its branch stays for whoever merges it. A subagent sharing its parent's
+    # worktree leaves it alone.
+    row = f.store.run(a.run)
+    parent = f.store.run(row["parent"]) if row and row["parent"] else None
+    wt = Path(row["worktree"]) if row and row["worktree"] else None
+    if wt and wt.parent == f.ws.root and (parent is None or parent["worktree"] != row["worktree"]):
+        f.ws.remove(wt)
     return 0 if r.status in ("done", "blocked") else 1
 
 
