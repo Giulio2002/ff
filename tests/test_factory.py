@@ -388,3 +388,15 @@ def test_direct_workflow_has_no_generator_rules(tmp_path):
     p.write_text(yaml.safe_dump(c))
     with pytest.raises(ConfigError):
         load(p)
+
+
+def test_resume_all_clears_every_pause(tmp_path, capsys):
+    repo = make_project(tmp_path, bug=False)
+    p = write_config(tmp_path, repo)
+    from ff.cli import main as ff
+    ff(["--config", str(p), "pause", "implement"])
+    ff(["--config", str(p), "statusline"])
+    assert "PAUSED implement" in capsys.readouterr().out
+    ff(["--config", str(p), "resume", "all"])
+    f = Factory.from_path(p)
+    assert not f.store.paused("implement")

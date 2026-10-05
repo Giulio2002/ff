@@ -130,6 +130,8 @@ def make_handler(f: Factory, token: str):
                     s.event("factory", "decided", f"decision #{parts[1]}: {b['answer']}")
                     return self._send(200, {"ok": True})
                 if len(parts) == 3 and parts[0] == "loops" and parts[2] in ("pause", "resume"):
+                    if parts[2] == "resume" and parts[1] == "all":
+                        s.x("DELETE FROM flags WHERE key LIKE 'paused:%'")
                     s.set_flag(f"paused:{parts[1]}", "1" if parts[2] == "pause" else None)
                     s.event(parts[1], parts[2], f"loop {parts[1]} {parts[2]}d via API")
                     return self._send(200, {"ok": True})

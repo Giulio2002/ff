@@ -400,6 +400,8 @@ def cmd_pause(a):
 
 def cmd_resume(a):
     f = _factory(a)
+    if a.loop == "all":   # every pause, the global one and each loop's
+        f.store.x("DELETE FROM flags WHERE key LIKE 'paused:%'")
     f.store.set_flag(f"paused:{a.loop}", None)
     f.store.event(a.loop, "resume", f"loop {a.loop} resumed")
 
@@ -654,8 +656,9 @@ def cmd_statusline(a):
     attention = st.q("SELECT COUNT(*) n FROM decisions WHERE answer IS NULL")[0]["n"]
     if attention:
         parts.append(f"⚠ {attention} decision{'s' if attention > 1 else ''}")
-    if st.flag("paused:all") == "1":
-        parts.append("PAUSED")
+    paused = [r["key"].split(":", 1)[1] for r in st.q("SELECT key FROM flags WHERE key LIKE 'paused:%' AND value = '1'")]
+    if paused:
+        parts.append("PAUSED " + ",".join(paused))
     print(" · ".join(parts))
 
 
