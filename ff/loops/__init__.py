@@ -82,6 +82,13 @@ class Loop:
                 r: RunResult = f.runner.run(role, brief, loop=self.name, worktree=worktree, branch=branch,
                                             attempt=attempt, result_extra=result_extra, extra=extra, run_id=rid)
                 runs.append(r.run_id)
+                if r.result.get("launch_error"):
+                    # the agent never started (a CLI refusing to run, a bad binary, no login): not the
+                    # agent's failure, so it costs no attempt; stop this loop until a human looks
+                    self.store.set_flag(f"paused:{self.name}", "1")
+                    self.log("launch-error", f"{role} could not start, loop {self.name} paused: "
+                                             f"{r.result['launch_error'][:500]}", r.run_id)
+                    return CycleOutcome(False, "launch-error", runs, r.result["launch_error"], r.result)
                 if r.status == "blocked":
                     return CycleOutcome(False, "blocked", runs, r.summary, r.result)
                 if r.status in ("stopped",):
@@ -133,8 +140,8 @@ class ImplementLoop(Loop):
         cmd = self.cfg.implement.backlog_command
         if not cmd:
             return
-        view = self.f.main_view()
-        code, out, _, _ = run_cmd(cmd, view, 600)
+        with self.f.main_view("backlog") as view:
+            code, out, _, _ = run_cmd(cmd, view, 1800)
         if code != 0:
             self.log("error", f"backlog command failed: {out[-500:]}")
             return
@@ -181,7 +188,7 @@ class ImplementLoop(Loop):
         note = self.store.q("SELECT note FROM backlog WHERE item = ?", (item,))[0]["note"]
         task = note if item.startswith("brief: ") and note else f"Close this open item of the contract:\n\n{item}"
         out = self.cycle(self.cfg.implement.role, task, max_attempts=self.cfg.implement.max_attempts)
-        status = {"merged": "done", "no-change": "open"}.get(out.status, "blocked")
+        status = {"merged": "done", "no-change": "open", "launch-error": "open"}.get(out.status, "blocked")
         self.store.x("UPDATE backlog SET status = ?, attempts = attempts + 1, run_id = ?, updated = ?, note = ? "
                      "WHERE item = ?", (status, out.run_ids[-1] if out.run_ids else None, time.time(),
                                         out.summary[:2000], item))
@@ -212,7 +219,8 @@ class OptimizeLoop(Loop):
         cached = self.store.flag(key)
         if cached:
             return float(cached)
-        v = self.measure(self.f.main_view())
+        with self.f.main_view("bench") as view:
+            v = self.measure(view)
         if v is not None:
             self.store.set_flag(key, str(v))
         return v

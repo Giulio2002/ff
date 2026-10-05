@@ -228,6 +228,15 @@ class Runner:
                                                          transcript, d, deadline, result_file)
         except Exception as e:  # a launcher failure must not take the loop down
             status, final_text, usage = "failed", f"runner error: {e!r}", {}
+        launch_error = None
+        if status == "failed":
+            err = (d / "stderr.log").read_text(errors="replace").strip() if (d / "stderr.log").exists() else ""
+            started_work = transcript.exists() and transcript.stat().st_size > 0
+            if not started_work or final_text.startswith("runner error"):
+                launch_error = (final_text if final_text.startswith("runner error") else "") or err[-2000:] or \
+                    "the agent CLI exited before producing any output"
+            if not final_text and err:
+                final_text = "stderr: " + err[-1500:]
         result = {}
         if result_file.exists():
             try:
@@ -239,6 +248,8 @@ class Runner:
         if status == "exited":
             status = result.get("status") if result.get("status") in ("done", "blocked") else (
                 "done" if result else "failed")
+        if launch_error:
+            result["launch_error"] = launch_error
         prev = json.loads((self.store.run(run_id) or {"result": None})["result"] or "{}")
         if prev.get("session_id"):
             result.setdefault("session_id", prev["session_id"])

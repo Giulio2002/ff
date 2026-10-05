@@ -92,6 +92,9 @@ def main(argv: list[str] | None = None) -> int:
         p.add_argument("loop")
     p = sub.add_parser("findings")
     p.add_argument("--round", type=int)
+    p = sub.add_parser("backlog", help="the implementation backlog; `reopen <item|all>` puts blocked items back")
+    p.add_argument("action", nargs="?", choices=["reopen"])
+    p.add_argument("item", nargs="?")
     sub.add_parser("gates")
     sub.add_parser("experiments")
     sub.add_parser("bill", help="tokens and cost per role and model")
@@ -399,6 +402,19 @@ def cmd_findings(a):
         print(f"#{r['id']:<4} r{r['round']} {r['flavor']:<10} {r['severity']:<8} {r['status']:<10} {r['title'][:90]}")
 
 
+def cmd_backlog(a):
+    f = _factory(a)
+    if a.action == "reopen":
+        if a.item == "all":
+            n = f.store.x("UPDATE backlog SET status = 'open', attempts = 0 WHERE status = 'blocked'")
+        else:
+            f.store.x("UPDATE backlog SET status = 'open', attempts = 0 WHERE item = ? OR item LIKE ?",
+                      (a.item, f"%{a.item}%"))
+        f.store.event("implement", "reopen", f"backlog reopened: {a.item}")
+    for r in f.store.q("SELECT * FROM backlog ORDER BY status, updated"):
+        print(f"{r['status']:<8} attempts={r['attempts']} {r['item'][:110]}" + (f"  [{r['run_id']}]" if r["run_id"] else ""))
+
+
 def cmd_gates(a):
     for g in _factory(a).store.q("SELECT * FROM gates ORDER BY id DESC LIMIT 30"):
         dur = (g["ended"] or time.time()) - g["started"]
@@ -465,8 +481,8 @@ def cmd_freeze(a):
         return 1
     from .factory import Factory
     f = Factory(cfg)
-    view = f.main_view()
-    stmts = frozen.collect(view, cfg.spec.frozen, cfg.project.language)
+    with f.main_view("freeze") as view:
+        stmts = frozen.collect(view, cfg.spec.frozen, cfg.project.language)
     print(f"{len(stmts)} statements in {', '.join(cfg.spec.frozen)}:")
     for k in sorted(stmts):
         print(f"  {k}")

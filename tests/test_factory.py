@@ -269,3 +269,25 @@ def test_rotation_moves_the_session_to_the_next_account(tmp_path, monkeypatch):
     f2 = Factory.from_path(p)
     r5 = f2.runner.run("glmworker", "task five", loop="t", worktree=wt, branch=br)
     assert r5.result["account"] == "glmcfg"
+
+
+def test_an_agent_that_cannot_start_costs_no_attempt(tmp_path):
+    repo = make_project(tmp_path, bug=False)
+    p = write_config(tmp_path, repo, implement={"enabled": True, "max_attempts": 3,
+                                                "backlog_command": "printf 'item one\\n'"})
+    import yaml
+    c = yaml.safe_load(p.read_text())
+    c["providers"]["broken"] = {"kind": "script", "command": ["sh", "-c", "echo 'cannot be used with root' >&2; exit 1"]}
+    c["roles"]["implementer"]["provider"] = "broken"
+    p.write_text(yaml.safe_dump(c))
+    f = Factory.from_path(p)
+    from ff.loops import ImplementLoop
+    loop = ImplementLoop(f)
+    loop.worker(0)
+    runs = f.store.q("SELECT * FROM runs")
+    assert len(runs) == 1, "a launch failure must not be retried in a loop"
+    assert "cannot be used with root" in runs[0]["summary"]
+    assert f.store.paused("implement")
+    item = f.store.q("SELECT * FROM backlog")[0]
+    assert item["status"] == "open"
+    assert any(e["kind"] == "launch-error" for e in f.store.events())

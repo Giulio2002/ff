@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import threading
+from contextlib import contextmanager
 import time
 from pathlib import Path
 
@@ -23,21 +24,27 @@ class Factory:
         self.gate = Gate(cfg, self.store)
         self.loops: dict = {}
         self._view_lock = threading.Lock()
+        self._view_locks: dict = {}
 
     @classmethod
     def from_path(cls, path) -> "Factory":
         return cls(load(path))
 
-    def main_view(self) -> Path:
-        """A detached, read-only-by-convention worktree of the current main (backlog, benchmarks)."""
-        view = self.cfg.project.state_dir / "main-view"
+    @contextmanager
+    def main_view(self, name: str = "main"):
+        """A detached worktree of the current main for one consumer (`name`: backlog, bench, ...),
+        refreshed and cleaned on entry and held under a lock until the block ends, so two
+        consumers never clean or rebuild under each other."""
+        view = self.cfg.project.state_dir / f"main-view-{name}"
         with self._view_lock:
+            lock = self._view_locks.setdefault(name, threading.Lock())
+        with lock:
             if not view.exists():
                 git(self.cfg.project.repo, "worktree", "add", "-q", "--detach", str(view), self.cfg.project.main_branch)
             else:
                 git(view, "checkout", "-q", "--detach", "-f", self.cfg.project.main_branch)
-                git(view, "clean", "-qfdx", check=False)
-        return view
+                git(view, "clean", "-qfdx", "-e", "build/", check=False)   # keep build caches
+            yield view
 
     def start_loops(self, names: list[str] | None = None) -> None:
         from .loops import LOOPS
