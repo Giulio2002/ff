@@ -28,6 +28,20 @@ first = sys.stdin.readline()
 with sess.open("a") as f:
     f.write(first)
 emit({"type": "system", "subtype": "init", "session_id": sid})
+if "BACKGROUND-WAKE" in first:
+    # like Claude Code: end the turn while a background command runs, wake with a new turn when it ends
+    import subprocess as sp
+    import time as tm
+    bg = sp.Popen(["sleep", "4"])
+    emit({"type": "result", "subtype": "success", "is_error": False, "result": "waiting for my background job",
+          "session_id": sid, "total_cost_usd": 0, "usage": {}})
+    bg.wait()
+    emit({"type": "assistant", "message": {"content": [{"type": "text", "text": "background job finished"}]}})
+    Path(os.environ["FF_RESULT_FILE"]).write_text(json.dumps({"status": "done", "summary": "woke up and finished",
+                                                              "account": cfg.name, "resumed": resumed, "first_message": "x"}))
+    emit({"type": "result", "subtype": "success", "is_error": False, "result": "done", "session_id": sid,
+          "total_cost_usd": 0, "usage": {}})
+    sys.exit(0)
 if (cfg / "EXHAUSTED").exists():
     reset = (cfg / "EXHAUSTED").read_text().strip()
     emit({"type": "assistant", "message": {"model": "<synthetic>", "content": [

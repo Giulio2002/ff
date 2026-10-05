@@ -50,6 +50,26 @@ def _kill(p: subprocess.Popen) -> None:
         pass
 
 
+def _children(pid: int) -> list[int]:
+    """Live child processes of pid (Linux /proc): an agent CLI's background commands."""
+    out = []
+    try:
+        for t in os.listdir(f"/proc/{pid}/task"):
+            with open(f"/proc/{pid}/task/{t}/children") as fh:
+                out += [int(x) for x in fh.read().split()]
+    except OSError:
+        return []
+    alive = []
+    for c in out:
+        try:
+            with open(f"/proc/{c}/stat") as fh:
+                if fh.read().split(")")[-1].split()[0] != "Z":
+                    alive.append(c)
+        except OSError:
+            pass
+    return alive
+
+
 def _claude_limit(ev: dict) -> str | None:
     """A usage-limit report from Claude Code: an error result, or the synthetic assistant message it
     emits for API errors. Tool output is never inspected (it could quote anything)."""
@@ -476,6 +496,25 @@ class Runner:
                 deliver_pending()
                 time.sleep(2)
 
+        def close_when_idle(turn: int):
+            """After the turn numbered `turn`, close the session once the agent has no background
+            processes left, unless a new turn starts (output arrives) or a message comes first."""
+            while p.poll() is None and time.time() < deadline:
+                if state.get("turns_seen") != turn or state.get("output_after", 0) > turn:
+                    return            # the agent woke up (or a message arrived): a new turn is running
+                if deliver_pending():
+                    return
+                if not _children(p.pid):
+                    break
+                time.sleep(3)
+            if state.get("turns_seen") == turn and state.get("output_after", 0) <= turn:
+                idle.set()
+                with lock:
+                    try:
+                        p.stdin.close()
+                    except Exception:
+                        pass
+
         send((info.get("resume_text") or CONTINUE) if resume else user)
         self._watchdog(run_id, p, deadline, state)
         threading.Thread(target=poll_inbox, daemon=True).start()
@@ -488,6 +527,8 @@ class Runner:
                     ev = json.loads(line)
                 except json.JSONDecodeError:
                     continue
+                if ev.get("type") != "result" and state.get("turns_seen"):
+                    state["output_after"] = state["turns_seen"] + 1   # a new turn started after the last result
                 if ev.get("type") == "system" and ev.get("session_id"):
                     info["session_id"] = ev["session_id"]
                     self.store.run_update(run_id, result={"session_id": ev["session_id"]})
@@ -504,14 +545,13 @@ class Runner:
                         usage[k] = usage.get(k, 0) + int(u.get(k) or 0)
                     usage["cost_usd"] = round(usage.get("cost_usd", 0) + float(ev.get("total_cost_usd") or 0), 4)
                     usage["turns"] = usage.get("turns", 0) + int(ev.get("num_turns") or 0)
-                    # a turn ended: continue with pending messages, otherwise end the session
+                    # A turn ended: continue with pending messages; otherwise end the session, but not
+                    # while the agent still has background work running (a command it started in the
+                    # background wakes it with a new turn when it finishes).
                     if not deliver_pending():
-                        idle.set()
-                        with lock:
-                            try:
-                                p.stdin.close()
-                            except Exception:
-                                pass
+                        turn = state.get("turns_seen", 0) + 1
+                        state["turns_seen"] = turn
+                        threading.Thread(target=close_when_idle, args=(turn,), daemon=True).start()
         p.wait()
         if state.get("killed"):
             return state["killed"], final_text, usage

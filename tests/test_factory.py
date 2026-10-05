@@ -474,3 +474,19 @@ def test_steering_a_finished_run_resumes_its_session(tmp_path, monkeypatch):
     r2 = f.runner.wait(new[0], timeout=60, poll=0.3)
     assert r2.status == "done", r2
     assert r2.result["resumed"] is True and "one more thing" in r2.result["first_message"], r2.result
+
+
+def test_a_session_stays_open_while_the_agent_has_background_work(tmp_path, monkeypatch):
+    monkeypatch.setenv("FF_AGENTS_HOME", str(tmp_path / "agents"))
+    repo = make_project(tmp_path, bug=False)
+    p = write_config(tmp_path, repo)
+    import yaml
+    c = yaml.safe_load(p.read_text())
+    c["providers"]["claude"] = {"kind": "claude", "binary": str(ROOT / "tests/fake_claude.py"),
+                                "env": {"CLAUDE_CONFIG_DIR": str(tmp_path / "cfg")}}
+    c["roles"]["worker"] = {"provider": "claude", "timeout_minutes": 2}
+    p.write_text(yaml.safe_dump(c))
+    f = Factory.from_path(p)
+    wt, br = f.ws.create("bg")
+    r = f.runner.run("worker", "BACKGROUND-WAKE", loop="adhoc", worktree=wt, branch=br)
+    assert r.status == "done" and r.summary == "woke up and finished", r
