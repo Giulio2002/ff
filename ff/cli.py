@@ -1,0 +1,582 @@
+"""`ff`: the one command for the human, the coordinator agent and the workers."""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import shutil
+import signal
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+from . import frozen
+from .config import ConfigError, load
+
+EXAMPLES = Path(__file__).resolve().parent.parent / "examples"
+
+
+def _dur(s: str) -> float:
+    m = re.fullmatch(r"(\d+(?:\.\d+)?)([smhd]?)", s.strip())
+    if not m:
+        raise argparse.ArgumentTypeError(f"bad duration {s!r} (use 30m, 10h, 2d)")
+    return float(m.group(1)) * {"": 1, "s": 1, "m": 60, "h": 3600, "d": 86400}[m.group(2)]
+
+
+def _ago(ts: float | None) -> str:
+    if not ts:
+        return "-"
+    d = time.time() - ts
+    return f"{d:.0f}s" if d < 120 else f"{d / 60:.0f}m" if d < 7200 else f"{d / 3600:.1f}h"
+
+
+def _factory(args):
+    from .factory import Factory
+    return Factory.from_path(args.config)
+
+
+def _print_json(obj) -> None:
+    print(json.dumps(obj, indent=1, default=str))
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(prog="ff", description="formal-programs factory")
+    ap.add_argument("--config", default=os.environ.get("FF_CONFIG", "factory.yaml"))
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    p = sub.add_parser("init", help="write an example factory.yaml")
+    p.add_argument("--language", choices=["bend", "lean"], default="bend")
+    p.add_argument("path", nargs="?", default="factory.yaml")
+    sub.add_parser("validate", help="load and check the configuration")
+
+    p = sub.add_parser("run", help="run the loops (and optionally the API) until interrupted")
+    p.add_argument("--loops", default="", help="comma-separated subset of implement,optimize,audit")
+    p.add_argument("--api", default="", help="also serve the steering API on [host:]port")
+    p = sub.add_parser("serve", help="serve the steering API only")
+    p.add_argument("--host", default="127.0.0.1")
+    p.add_argument("--port", type=int, default=8787)
+
+    p = sub.add_parser("status")
+    p.add_argument("--json", action="store_true")
+    p = sub.add_parser("events")
+    p.add_argument("--since", type=_dur, default=_dur("10h"))
+    p.add_argument("--loop")
+    p.add_argument("--limit", type=int, default=200)
+    p = sub.add_parser("runs")
+    p.add_argument("--status")
+    p.add_argument("--limit", type=int, default=50)
+    p = sub.add_parser("show")
+    p.add_argument("run")
+    p = sub.add_parser("tail")
+    p.add_argument("run")
+    p.add_argument("-n", type=int, default=40)
+    p.add_argument("-f", "--follow", action="store_true")
+    p = sub.add_parser("steer", help="message a running agent (optionally all its live subagents)")
+    p.add_argument("run")
+    p.add_argument("text")
+    p.add_argument("--cascade", action="store_true")
+    p = sub.add_parser("stop")
+    p.add_argument("run")
+    p.add_argument("--no-cascade", action="store_true")
+    p = sub.add_parser("brief", help="guidance for the next agents of a loop (or 'all')")
+    p.add_argument("loop")
+    p.add_argument("text")
+    sub.add_parser("decisions")
+    p = sub.add_parser("decide")
+    p.add_argument("id", type=int)
+    p.add_argument("answer")
+    for name in ("pause", "resume"):
+        p = sub.add_parser(name)
+        p.add_argument("loop")
+    p = sub.add_parser("findings")
+    p.add_argument("--round", type=int)
+    sub.add_parser("gates")
+    sub.add_parser("experiments")
+    sub.add_parser("bill", help="tokens and cost per role and model")
+
+    p = sub.add_parser("gate", help="gate a branch now (green moves main)")
+    p.add_argument("branch")
+    p = sub.add_parser("gate-run", help="the gate, for a remote build server")
+    p.add_argument("branch")
+    p.add_argument("--json", action="store_true")
+    p = sub.add_parser("check", help="the gate's checks on the current worktree")
+    p.add_argument("--files", nargs="*")
+    p.add_argument("--no-tests", action="store_true")
+    p.add_argument("--no-regenerate", action="store_true")
+    p = sub.add_parser("freeze", help="lock the current frozen statements on main (human bootstrap)")
+    p.add_argument("--yes", action="store_true")
+    p.add_argument("--force", action="store_true", help="replace an existing lock")
+
+    p = sub.add_parser("note", help="(agents) a progress note for the coordinator")
+    p.add_argument("text")
+    sub.add_parser("inbox", help="(agents) messages sent to this run")
+    p = sub.add_parser("agent", help="start/wait an ad-hoc agent")
+    asub = p.add_subparsers(dest="action", required=True)
+    q = asub.add_parser("start")
+    q.add_argument("role")
+    q.add_argument("task")
+    q = asub.add_parser("wait")
+    q.add_argument("run")
+    q.add_argument("--timeout", type=float)
+
+    p = sub.add_parser("subagent", help="(agents) start, steer and wait for subagents")
+    ssub = p.add_subparsers(dest="action", required=True)
+    for name in ("start", "run"):
+        q = ssub.add_parser(name)
+        q.add_argument("role")
+        q.add_argument("task")
+        q.add_argument("--own-worktree", action="store_true")
+        q.add_argument("--timeout", type=float)
+    for name in ("wait", "stop"):
+        q = ssub.add_parser(name)
+        q.add_argument("run")
+        q.add_argument("--timeout", type=float)
+    q = ssub.add_parser("steer")
+    q.add_argument("run")
+    q.add_argument("text")
+    q.add_argument("--cascade", action="store_true")
+    q = ssub.add_parser("status")
+    q.add_argument("run", nargs="?")
+
+    sub.add_parser("chat", help="talk to the coordinator agent")
+    p = sub.add_parser("_run-agent")
+    p.add_argument("run")
+
+    a = ap.parse_args(argv)
+    try:
+        return COMMANDS[a.cmd.replace("-", "_")](a) or 0
+    except ConfigError as e:
+        print(f"configuration error: {e}", file=sys.stderr)
+        return 2
+
+
+# ===================================================================== commands
+
+def cmd_init(a):
+    src = EXAMPLES / f"factory.{a.language}.yaml"
+    dst = Path(a.path)
+    if dst.exists():
+        print(f"{dst} exists; not overwriting", file=sys.stderr)
+        return 1
+    shutil.copy(src, dst)
+    print(f"wrote {dst}; edit project.repo, the commands and the providers, then `ff validate`")
+
+
+def cmd_validate(a):
+    cfg = load(a.config)
+    print(f"ok: {cfg.project.name} ({cfg.project.language}), repo {cfg.project.repo}, state {cfg.project.state_dir}")
+    for r in cfg.roles.values():
+        prov = cfg.provider_for(r)
+        print(f"  role {r.name:<20} {prov.name}/{prov.kind} model={cfg.model_for(r)}"
+              + (f" subagents={','.join(r.subagents)}" if r.subagents else "") + (" (subagent only)" if r.subagent_only else ""))
+    for name, prov in cfg.providers.items():
+        if prov.kind != "script" and not shutil.which(prov.binary):
+            print(f"  warning: provider {name}: '{prov.binary}' is not on PATH")
+    if not (cfg.project.repo / ".git").exists():
+        print(f"  warning: {cfg.project.repo} is not a git repository")
+
+
+def cmd_run(a):
+    f = _factory(a)
+    names = [n for n in a.loops.split(",") if n] or None
+    srv = None
+    if a.api:
+        import threading
+        from .api import serve
+        host, _, port = a.api.rpartition(":")
+        srv = serve(f, host or "127.0.0.1", int(port))
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        print(f"steering API on http://{host or '127.0.0.1'}:{port}  token: {srv.token}", flush=True)
+    f.start_loops(names)
+    print(f"factory {f.cfg.project.name} running loops: {', '.join(f.loops) or '(none)'}; state in "
+          f"{f.cfg.project.state_dir}", flush=True)
+    stop = []
+    signal.signal(signal.SIGTERM, lambda *_: stop.append(1))
+    try:
+        while not stop and any(t.is_alive() for l in f.loops.values() for t in l.threads):
+            time.sleep(5)
+    except KeyboardInterrupt:
+        pass
+    f.stop_loops()
+    if srv:
+        srv.shutdown()
+    print("factory stopped (running agents finish their current step; `ff stop` ends them)")
+
+
+def cmd_serve(a):
+    from .api import serve
+    f = _factory(a)
+    srv = serve(f, a.host, a.port)
+    print(f"steering API on http://{a.host}:{a.port}  token: {srv.token}", flush=True)
+    try:
+        srv.serve_forever()
+    except KeyboardInterrupt:
+        pass
+
+
+def cmd_status(a):
+    f = _factory(a)
+    s = f.status()
+    if a.json:
+        return _print_json(s)
+    print(f"{s['project']} ({s['language']})  main {s['main']}  spent ${s['cost_usd']}"
+          + (f"  PAUSED: {', '.join(s['paused'])}" if s["paused"] else ""))
+    g = s["last_gate"]
+    if g:
+        print(f"last gate #{g['id']} {g['status']} {g['branch']} {_ago(g['ended'] or g['started'])} ago"
+              + (f" ({g['reason']})" if g["status"] == "red" else ""))
+    if s["backlog"]:
+        print("backlog: " + ", ".join(f"{k} {v}" for k, v in s["backlog"].items()))
+    if s["audit_round"]:
+        r = s["audit_round"]
+        print(f"audit round {r['n']}: {r['status']} {r['counts'] or ''}")
+    print(f"{len(s['running'])} agent(s) running:")
+    for r in s["running"]:
+        print(f"  {r['id']:<36} {r['loop'] or '':<10} {_ago(r['started'])}  {(r['task'] or '').splitlines()[0][:70]}"
+              + (f"  (child of {r['parent']})" if r["parent"] else ""))
+    for d in s["open_decisions"]:
+        print(f"DECISION #{d['id']}: {d['question']} {d['options']}  ->  ff decide {d['id']} <answer>")
+
+
+def cmd_events(a):
+    f = _factory(a)
+    for e in f.store.events(time.time() - a.since, a.loop, a.limit):
+        print(f"{time.strftime('%m-%d %H:%M', time.localtime(e['ts']))} {e['loop']:<9} {e['kind']:<16} {e['message']}"
+              + (f"  [{e['run_id']}]" if e["run_id"] else ""))
+
+
+def cmd_runs(a):
+    f = _factory(a)
+    rows = f.store.q("SELECT * FROM runs " + ("WHERE status = ? " if a.status else "") + "ORDER BY started DESC LIMIT ?",
+                     ([a.status] if a.status else []) + [a.limit])
+    for r in rows:
+        u = json.loads(r["usage"] or "{}")
+        dur = (r["ended"] or time.time()) - (r["started"] or time.time())
+        print(f"{r['id']:<36} {r['status']:<8} {r['loop'] or '':<9} {r['provider']}/{r['model'] or '-'} "
+              f"{dur / 60:.0f}m ${u.get('cost_usd', 0)}  {(r['summary'] or r['task'] or '').splitlines()[0][:60] if (r['summary'] or r['task']) else ''}")
+
+
+def cmd_show(a):
+    v = _factory(a).run_view(a.run)
+    if v is None:
+        print("no such run", file=sys.stderr)
+        return 1
+    v.pop("transcript_tail", None)
+    _print_json(v)
+
+
+def _render(line: str) -> str:
+    try:
+        ev = json.loads(line)
+    except json.JSONDecodeError:
+        return line.rstrip()
+    t = ev.get("type")
+    if t == "assistant":
+        out = []
+        for c in ev.get("message", {}).get("content", []):
+            if c.get("type") == "text":
+                out.append("assistant: " + c["text"].strip()[:2000])
+            elif c.get("type") == "tool_use":
+                out.append(f"tool {c.get('name')}: {json.dumps(c.get('input'))[:300]}")
+        return "\n".join(out)
+    if t == "user":
+        for c in ev.get("message", {}).get("content", []):
+            if isinstance(c, dict) and c.get("type") == "tool_result":
+                txt = c.get("content")
+                txt = txt if isinstance(txt, str) else json.dumps(txt)
+                return f"  -> {txt[:300]}"
+            if isinstance(c, dict) and c.get("type") == "text":
+                return "user: " + c["text"][:500]
+        return ""
+    if t == "result":
+        return f"== turn done: {ev.get('subtype')} ${ev.get('total_cost_usd')}"
+    if t in ("item.completed", "item.started"):
+        it = ev.get("item", {})
+        return f"{it.get('type')}: {(it.get('text') or it.get('command') or '')[:500]}"
+    return ""
+
+
+def cmd_tail(a):
+    f = _factory(a)
+    r = f.store.run(a.run)
+    if r is None or not r["transcript"]:
+        print("no transcript yet", file=sys.stderr)
+        return 1
+    path = Path(r["transcript"])
+    lines = path.read_text(errors="replace").splitlines()[-a.n:]
+    for l in lines:
+        s = _render(l)
+        if s:
+            print(s)
+    if a.follow:
+        with path.open() as fh:
+            fh.seek(0, 2)
+            while True:
+                l = fh.readline()
+                if not l:
+                    if f.store.run(a.run)["status"] in ("done", "blocked", "failed", "timeout", "stopped"):
+                        return
+                    time.sleep(1)
+                    continue
+                s = _render(l)
+                if s:
+                    print(s, flush=True)
+
+
+def cmd_steer(a):
+    f = _factory(a)
+    if not f.store.run(a.run):
+        print("no such run", file=sys.stderr)
+        return 1
+    sender = os.environ.get("FF_RUN_ID", "human")
+    print("delivered to: " + ", ".join(f.runner.steer(a.run, a.text, sender=sender, cascade=a.cascade)))
+
+
+def cmd_stop(a):
+    print("stopping: " + ", ".join(_factory(a).runner.stop(a.run, not a.no_cascade)))
+
+
+def cmd_brief(a):
+    f = _factory(a)
+    bid = f.store.x("INSERT INTO briefs (loop, text, status, ts) VALUES (?,?, 'open', ?)", (a.loop, a.text, time.time()))
+    f.store.event(a.loop, "brief", f"brief #{bid}: {a.text[:200]}")
+    print(f"brief #{bid} queued for {a.loop}")
+
+
+def cmd_decisions(a):
+    for d in _factory(a).store.q("SELECT * FROM decisions WHERE answer IS NULL"):
+        print(f"#{d['id']} ({_ago(d['asked'])} ago) {d['question']} options: {d['options']}")
+
+
+def cmd_decide(a):
+    f = _factory(a)
+    f.store.x("UPDATE decisions SET answer = ?, answered = ? WHERE id = ?", (a.answer, time.time(), a.id))
+    f.store.event("factory", "decided", f"decision #{a.id}: {a.answer}")
+
+
+def cmd_pause(a):
+    f = _factory(a)
+    f.store.set_flag(f"paused:{a.loop}", "1")
+    f.store.event(a.loop, "pause", f"loop {a.loop} paused")
+
+
+def cmd_resume(a):
+    f = _factory(a)
+    f.store.set_flag(f"paused:{a.loop}", None)
+    f.store.event(a.loop, "resume", f"loop {a.loop} resumed")
+
+
+def cmd_findings(a):
+    f = _factory(a)
+    rows = f.store.q("SELECT * FROM findings " + ("WHERE round = ? " if a.round else "") + "ORDER BY id",
+                     [a.round] if a.round else [])
+    for r in rows:
+        print(f"#{r['id']:<4} r{r['round']} {r['flavor']:<10} {r['severity']:<8} {r['status']:<10} {r['title'][:90]}")
+
+
+def cmd_gates(a):
+    for g in _factory(a).store.q("SELECT * FROM gates ORDER BY id DESC LIMIT 30"):
+        dur = (g["ended"] or time.time()) - g["started"]
+        print(f"#{g['id']:<4} {g['status']:<6} {dur / 60:5.1f}m {g['branch']:<40} {g['reason'] or ''}  {g['log'] or ''}")
+
+
+def cmd_experiments(a):
+    for e in _factory(a).store.q("SELECT * FROM experiments ORDER BY id DESC LIMIT 50"):
+        print(f"#{e['id']:<4} {'KEPT' if e['kept'] else 'reverted':<8} {e['baseline']} -> {e['candidate']}  {e['idea'][:80]}  ({e['reason'][:60]})")
+
+
+def cmd_bill(a):
+    f = _factory(a)
+    rows = f.store.q("SELECT role, provider, model, COUNT(*) n, "
+                     "SUM(json_extract(usage,'$.cost_usd')) cost, SUM(json_extract(usage,'$.output_tokens')) out, "
+                     "SUM(json_extract(usage,'$.cache_read_input_tokens')) cr, "
+                     "SUM(json_extract(usage,'$.cache_creation_input_tokens')) cw "
+                     "FROM runs GROUP BY role, provider, model ORDER BY cost DESC")
+    total = 0
+    print(f"{'role':<20} {'provider/model':<34} {'runs':>5} {'output':>10} {'cache rd':>12} {'cache wr':>12} {'cost':>10}")
+    for r in rows:
+        total += r["cost"] or 0
+        print(f"{r['role']:<20} {(r['provider'] + '/' + (r['model'] or '-'))[:34]:<34} {r['n']:>5} {r['out'] or 0:>10} "
+              f"{r['cr'] or 0:>12} {r['cw'] or 0:>12} ${r['cost'] or 0:>9.2f}")
+    print(f"total ${total:.2f} (reported by the CLIs; codex reports tokens only)")
+
+
+def cmd_gate(a):
+    v = _factory(a).gate.submit(a.branch, None, "manual")
+    print(("GREEN" if v.ok else f"RED at {v.stage}: {v.reason}") + "\n" + v.log[-4000:])
+    return 0 if v.ok else 1
+
+
+def cmd_gate_run(a):
+    v = _factory(a).gate.submit(a.branch, None, "remote")
+    if a.json:
+        print(json.dumps({"ok": v.ok, "stage": v.stage, "reason": v.reason, "log": v.log[-20000:]}))
+    else:
+        print(("GREEN" if v.ok else f"RED at {v.stage}: {v.reason}") + "\n" + v.log[-4000:])
+    return 0 if v.ok else 1
+
+
+def cmd_check(a):
+    from .gate import verify_tree
+    from .git import git as _git
+    cfg = load(a.config)
+    root = Path(os.environ.get("FF_WORKTREE") or _git(Path.cwd(), "rev-parse", "--show-toplevel"))
+    lock = frozen.load_lock(_git(root, "show", f"{cfg.project.main_branch}:{cfg.spec.lock_file}", check=False) or None)
+    v = verify_tree(cfg, root, lock, regenerate=not a.no_regenerate, only=a.files, run_tests=not a.no_tests,
+                    full=not a.files)
+    print(("OK: the gate's checks pass on this tree" if v.ok else f"FAIL at {v.stage}: {v.reason}") + "\n\n" + v.log[-8000:])
+    return 0 if v.ok else 1
+
+
+def cmd_freeze(a):
+    """Bootstrap: write the lock for the current frozen statements directly on main. This is the
+    human freezing the spec; afterwards only the gate writes the lock."""
+    from .git import git as _git
+    cfg = load(a.config)
+    repo, main = cfg.project.repo, cfg.project.main_branch
+    existing = _git(repo, "show", f"{main}:{cfg.spec.lock_file}", check=False)
+    if existing and not a.force:
+        print(f"{cfg.spec.lock_file} already exists on {main}; use --force to replace it", file=sys.stderr)
+        return 1
+    from .factory import Factory
+    f = Factory(cfg)
+    view = f.main_view()
+    stmts = frozen.collect(view, cfg.spec.frozen, cfg.project.language)
+    print(f"{len(stmts)} statements in {', '.join(cfg.spec.frozen)}:")
+    for k in sorted(stmts):
+        print(f"  {k}")
+    if not a.yes:
+        print("re-run with --yes to commit the lock on main")
+        return 0
+    tmp = cfg.project.state_dir / "freeze"
+    shutil.rmtree(tmp, ignore_errors=True)
+    _git(repo, "worktree", "add", "-q", "--detach", str(tmp), main)
+    try:
+        (tmp / cfg.spec.lock_file).write_text(frozen.dump_lock(frozen.lock_of(stmts)))
+        _git(tmp, "add", cfg.spec.lock_file)
+        _git(tmp, "-c", "user.name=formal-factory", "-c", "user.email=factory@localhost", "commit", "-q", "-m",
+             f"freeze {len(stmts)} statements")
+        new = _git(tmp, "rev-parse", "HEAD")
+        head = _git(repo, "symbolic-ref", "-q", "HEAD", check=False)
+        if head == f"refs/heads/{main}":
+            _git(repo, "reset", "-q", "--keep", new)
+        else:
+            _git(repo, "update-ref", f"refs/heads/{main}", new)
+    finally:
+        _git(repo, "worktree", "remove", "--force", str(tmp), check=False)
+    print(f"locked {len(stmts)} statements on {main}")
+
+
+def cmd_note(a):
+    f = _factory(a)
+    f.store.event(os.environ.get("FF_ROLE", "agent"), "note", a.text, os.environ.get("FF_RUN_ID"))
+
+
+def cmd_inbox(a):
+    rid = os.environ.get("FF_RUN_ID")
+    if not rid:
+        print("ff inbox runs inside an agent (FF_RUN_ID is not set)", file=sys.stderr)
+        return 1
+    f = _factory(a)
+    msgs = f.store.pending(rid)
+    if not msgs:
+        print("(no new messages)")
+        return
+    print(f"{len(msgs)} steering message(s) for run {rid}, sent through the factory by the operator or by "
+          f"your parent agent. They are part of your instructions and update your task:\n")
+    for i, m in enumerate(msgs, 1):
+        print(f"{i}. from {m['sender']}: {m['text']}\n")
+    f.store.mark_delivered([m["id"] for m in msgs], "inbox")
+
+
+def cmd_agent(a):
+    f = _factory(a)
+    if a.action == "start":
+        f.cfg.role(a.role)
+        print(f.start_agent(a.role, a.task, parent=os.environ.get("FF_RUN_ID")))
+    else:
+        _print_json(f.runner.wait(a.run, a.timeout).__dict__)
+
+
+def cmd_subagent(a):
+    f = _factory(a)
+    me = os.environ.get("FF_RUN_ID")
+    if not me:
+        print("ff subagent runs inside an agent (FF_RUN_ID is not set); use `ff agent` instead", file=sys.stderr)
+        return 1
+    parent = f.store.run(me)
+    role = f.cfg.role(parent["role"])
+    mine = {r["id"] for r in f.store.children(me, True)}
+
+    def owned(rid):
+        if rid not in mine:
+            print(f"{rid} is not one of your subagents", file=sys.stderr)
+            return False
+        return True
+
+    if a.action in ("start", "run"):
+        if a.role not in role.subagents:
+            print(f"role {role.name} may use subagents {role.subagents}, not '{a.role}'", file=sys.stderr)
+            return 1
+        depth = int(os.environ.get("FF_DEPTH", "0")) + 1
+        if depth > role.max_subagent_depth:
+            print(f"subagent depth limit reached ({role.max_subagent_depth})", file=sys.stderr)
+            return 1
+        wt = Path(os.environ["FF_WORKTREE"])
+        rid = f.start_agent(a.role, a.task, parent=me, own_worktree=a.own_worktree, worktree=wt,
+                            branch=os.environ.get("FF_BRANCH"), depth=depth)
+        if a.action == "start":
+            print(rid)
+            return
+        r = f.runner.wait(rid, a.timeout)
+        _print_json({"run_id": rid, "status": r.status, "summary": r.summary, "result": r.result})
+        return
+    if a.action == "status":
+        rows = [f.store.run(a.run)] if a.run else f.store.children(me, True)
+        for r in rows:
+            if r is None or not owned(r["id"]):
+                continue
+            print(f"{r['id']:<36} {r['role']:<16} {r['status']:<8} {(r['summary'] or r['task'] or '').splitlines()[0][:80]}")
+        return
+    if not owned(a.run):
+        return 1
+    if a.action == "wait":
+        r = f.runner.wait(a.run, a.timeout)
+        _print_json({"run_id": a.run, "status": r.status, "summary": r.summary, "result": r.result})
+    elif a.action == "steer":
+        print("delivered to: " + ", ".join(f.runner.steer(a.run, a.text, sender=me, cascade=a.cascade)))
+    elif a.action == "stop":
+        print("stopping: " + ", ".join(f.runner.stop(a.run)))
+
+
+def cmd_chat(a):
+    """The coordinator: an interactive agent session in the state directory with the `ff` tools."""
+    from .agents import ff_bin
+    from .prompts import _Safe, default_prompt
+    cfg = load(a.config)
+    role = cfg.role(cfg.coordinator)
+    prov = cfg.provider_for(role)
+    text = (role.prompt or default_prompt("coordinator")).format_map(_Safe(project=cfg.project.name))
+    env = dict(os.environ, **prov.env, **role.env, FF_CONFIG=str(cfg.path))
+    env["PATH"] = str(ff_bin(cfg.project.state_dir)) + os.pathsep + env.get("PATH", "")
+    model = cfg.model_for(role)
+    if prov.kind == "claude":
+        argv = [prov.binary, "--append-system-prompt", text] + (["--model", model] if model else []) + prov.args + role.args
+    elif prov.kind == "codex":
+        argv = [prov.binary] + (["-m", model] if model else []) + prov.args + role.args + [text + "\n\nStart with `ff status`."]
+    else:
+        print("the coordinator needs a claude or codex provider", file=sys.stderr)
+        return 1
+    cfg.project.state_dir.mkdir(parents=True, exist_ok=True)
+    return subprocess.call(argv, cwd=cfg.project.state_dir, env=env)
+
+
+def cmd__run_agent(a):
+    f = _factory(a)
+    r = f.runner.execute_queued(a.run)
+    return 0 if r.status in ("done", "blocked") else 1
+
+
+COMMANDS = {k[4:]: v for k, v in globals().items() if k.startswith("cmd_")}

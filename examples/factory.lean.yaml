@@ -1,0 +1,155 @@
+# formal-factory configuration (Lean 4). One file: the target, the checker, the providers, every role.
+# ${VAR} and ${VAR:-default} are read from the environment.
+
+project:
+  name: my-formal-lib
+  repo: ../my-formal-lib          # the factory's own clone of the target (relative to this file)
+  main_branch: main
+  # remote: origin                # push main here after every green gate
+  language: lean                  # bend | lean
+  # state_dir: ~/.formal-factory/my-formal-lib
+
+commands:
+  regenerate: python3 tools/generate_all.py      # every generated file comes from here
+  unit_tests: python3 -m pytest -q tools/tests
+  vectors: python3 tools/run_vectors.py          # official test vectors
+  runtime_tests: make -C ffi check               # the compiled library, for real
+
+generated: ["MyLib/Generated/**/*.lean"]       # never edited by hand
+
+checker:
+  lean:
+    binary: lake
+    args: ["env", "lean"]
+    files: ["MyLib/**/*.lean"]
+    file_timeout_seconds: 120     # "each file under 2 minutes"
+    jobs: 16
+    # forbidden by default: sorry, admit, axiom, implemented_by, unsafe, debug.skipKernelTC, native_decide
+    allowed_axioms: [propext, Classical.choice, Quot.sound]   # #print axioms of every frozen theorem
+
+spec:
+  frozen: ["MyLib/Spec/**/*.lean", "MyLib/Laws/**/*.lean"]
+  lock_file: frozen.lock.json
+  changes_file: frozen_changes.yaml
+  require_implication_proof: true
+
+benchmark:
+  command: python3 tools/bench.py --json         # prints the number the optimizer chases
+  metric: '"decode_ns":\s*([0-9.]+)'
+  direction: lower
+  min_improvement_pct: 2
+  repeats: 3
+
+gate:
+  host: local                     # or user@buildserver (runs `ff gate-run` there)
+  cold: true
+
+# The three model families. claude and gpt use their own CLIs (Claude Code, Codex);
+# glm is Claude Code pointed at an Anthropic-compatible GLM endpoint through env vars.
+providers:
+  claude:
+    kind: claude
+    model: claude-opus-5-5
+  claude-fast:
+    kind: claude
+    model: claude-sonnet-5
+  gpt:
+    kind: codex
+    # model: <codex model>        # omitted: the default from ~/.codex/config.toml
+    sandbox: danger-full-access   # the worktree is the boundary; use workspace-write to sandbox
+  glm:
+    kind: claude
+    model: ${GLM_MODEL:-glm-5.3}
+    env:
+      ANTHROPIC_BASE_URL: ${GLM_BASE_URL:-https://api.z.ai/api/anthropic}
+      ANTHROPIC_AUTH_TOKEN: ${GLM_API_KEY}
+      ANTHROPIC_MODEL: ${GLM_MODEL:-glm-5.3}
+      ANTHROPIC_DEFAULT_OPUS_MODEL: ${GLM_MODEL:-glm-5.3}
+      ANTHROPIC_DEFAULT_SONNET_MODEL: ${GLM_MODEL:-glm-5.3}
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: ${GLM_FAST_MODEL:-glm-5.3-air}
+      API_TIMEOUT_MS: "3000000"
+      CLAUDE_CONFIG_DIR: ${HOME}/.claude-glm   # keep GLM sessions apart from your Claude login
+
+# Every role: provider, model override, prompt (inline, a file, or the built-in default named
+# after the role), timeout, subagents (roles it may start, steer and wait for), extra env/args.
+roles:
+  coordinator:
+    provider: claude
+  implementer:
+    provider: claude
+    timeout_minutes: 180
+    subagents: [explorer, prover]
+  optimizer:
+    provider: gpt
+    timeout_minutes: 120
+    subagents: [explorer]
+  auditor_mutation:
+    provider: glm
+    timeout_minutes: 240
+    subagents: [explorer]
+  auditor_crash:
+    provider: glm
+    timeout_minutes: 240
+    subagents: [explorer]
+  auditor_regression:
+    provider: gpt
+    timeout_minutes: 120
+  judge:
+    provider: claude
+    timeout_minutes: 60
+  fixer:
+    provider: claude
+    timeout_minutes: 180
+    subagents: [explorer, prover, attacker]
+  # subagent-only roles
+  explorer:
+    provider: claude-fast
+    subagent_only: true
+    timeout_minutes: 30
+    prompt: |
+      # Role: explorer
+      Answer the question you are given about this codebase: find the files, read them, report
+      precisely (paths, line numbers, what the code does). Do not edit anything.
+  prover:
+    provider: claude
+    subagent_only: true
+    timeout_minutes: 90
+    prompt: |
+      # Role: prover
+      Get the one law or lemma you are given to check, through the generators. Report what you
+      changed and whether `ff check --files ...` passes. Do not touch frozen statements.
+  attacker:
+    provider: glm
+    subagent_only: true
+    timeout_minutes: 60
+    prompt: |
+      # Role: attacker
+      Try to break the fix you are shown: inputs a real caller can produce through the public API
+      that still crash, hang, allocate too much or give a wrong result. Report reproducers.
+
+loops:
+  implement:
+    enabled: true
+    role: implementer
+    workers: 3
+    max_attempts: 3
+    backlog_command: python3 tools/missing_laws.py   # one open item per line (or a JSON list)
+  optimize:
+    enabled: false
+    role: optimizer
+    workers: 1
+  audit:
+    enabled: true
+    flavors: {mutation: auditor_mutation, crash: auditor_crash, regression: auditor_regression}
+    judge: judge
+    fixer: fixer
+    fixers: 3
+    max_rounds: 8
+    stop_when_critical_at_most: 0
+    confirm_each_round: true
+    known_limitations_file: KNOWN_LIMITATIONS.md
+    evidence_file: EVIDENCE.md
+
+limits:
+  max_parallel_agents: 8
+  nice: 19

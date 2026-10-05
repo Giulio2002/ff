@@ -1,0 +1,418 @@
+"""The three loops: implement (builds it), optimize (makes it fast), audit (tries to break it).
+All of them hand their work to the same gate."""
+from __future__ import annotations
+
+import json
+import re
+import statistics
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
+from pathlib import Path
+from typing import TYPE_CHECKING
+
+from ..agents import RunResult, new_run_id
+from ..checkers import run_cmd
+from ..git import git, sha
+
+if TYPE_CHECKING:
+    from ..factory import Factory
+
+
+@dataclass
+class CycleOutcome:
+    ok: bool
+    status: str           # merged | blocked | gave-up | no-change | rejected
+    run_ids: list[str]
+    summary: str = ""
+    result: dict | None = None
+
+
+class Loop:
+    name = ""
+
+    def __init__(self, f: "Factory"):
+        self.f, self.cfg, self.store = f, f.cfg, f.store
+        self.stop = threading.Event()
+        self.threads: list[threading.Thread] = []
+
+    def log(self, kind: str, msg: str, run_id: str | None = None, **data) -> None:
+        self.store.event(self.name, kind, msg, run_id, **data)
+
+    def wait_unpaused(self) -> bool:
+        while self.store.paused(self.name):
+            if self.stop.wait(10):
+                return False
+        return not self.stop.is_set()
+
+    def start(self, workers: int) -> None:
+        for i in range(workers):
+            t = threading.Thread(target=self._guard, args=(i,), name=f"{self.name}-{i}", daemon=True)
+            t.start()
+            self.threads.append(t)
+
+    def _guard(self, i: int) -> None:
+        while not self.stop.is_set():
+            try:
+                if self.worker(i) is False:
+                    return
+            except Exception as e:  # keep the loop alive; tell the coordinator
+                self.log("error", f"{self.name} worker {i} crashed: {e!r}; restarting in 60s")
+                self.stop.wait(60)
+
+    def worker(self, i: int):
+        raise NotImplementedError
+
+    # ---------------------------------------------------------------- the shared cycle
+
+    def cycle(self, role: str, task: str, *, max_attempts: int, result_extra: str = "",
+              extra: dict | None = None, accept=None) -> CycleOutcome:
+        """worktree -> agent -> commit -> rebase -> gate, retrying with the gate's log on red.
+        `accept(result, worktree)` may veto before the gate (the optimizer's benchmark)."""
+        f = self.f
+        first = new_run_id(role)
+        worktree, branch = f.ws.create(first)
+        runs, brief = [], task
+        try:
+            for attempt in range(1, max_attempts + 1):
+                if not self.wait_unpaused():
+                    return CycleOutcome(False, "gave-up", runs, "stopped")
+                rid = first if attempt == 1 else new_run_id(role)
+                r: RunResult = f.runner.run(role, brief, loop=self.name, worktree=worktree, branch=branch,
+                                            attempt=attempt, result_extra=result_extra, extra=extra, run_id=rid)
+                runs.append(r.run_id)
+                if r.status == "blocked":
+                    return CycleOutcome(False, "blocked", runs, r.summary, r.result)
+                if r.status in ("stopped",):
+                    return CycleOutcome(False, "gave-up", runs, "stopped by request", r.result)
+                f.ws.commit_pending(worktree, f"{role}: {r.summary.splitlines()[0][:72] if r.summary else 'work in progress'}")
+                if not f.ws.has_new_commits(worktree):
+                    if r.status != "done":
+                        brief = task + f"\n\n# Previous attempt\n\nThe previous run ended with status {r.status} " \
+                                       f"and no commits. Summary: {r.summary[:1500]}"
+                        continue
+                    return CycleOutcome(False, "no-change", runs, r.summary, r.result)
+                if accept is not None:
+                    ok, why = accept(r, worktree)
+                    if not ok:
+                        return CycleOutcome(False, "rejected", runs, why, r.result)
+                for _ in range(3):  # stale or raced: rebase and resubmit without bothering the agent
+                    if not f.ws.rebase_on_main(worktree):
+                        v = None
+                        break
+                    v = f.gate.submit(branch, r.run_id, r.summary)
+                    if v.ok or v.stage not in ("stale", "race"):
+                        break
+                if v is None:
+                    brief = task + "\n\n# Rebase conflict\n\nmain moved and your branch no longer rebases " \
+                                   f"cleanly onto {self.cfg.project.main_branch}. Rebase it yourself " \
+                                   f"(`git rebase {self.cfg.project.main_branch}`), resolve, regenerate, commit."
+                    continue
+                if v.ok:
+                    return CycleOutcome(True, "merged", runs, r.summary, r.result)
+                brief = task + f"\n\n# The gate rejected your previous attempt (stage: {v.stage})\n\n" \
+                               f"{v.reason}\n\n```\n{v.log[-6000:]}\n```\nFix it on the same branch and commit."
+            return CycleOutcome(False, "gave-up", runs, f"no green gate after {max_attempts} attempts")
+        finally:
+            f.ws.remove(worktree)
+
+    def fresh_tree(self, role: str):
+        rid = new_run_id(role)
+        wt, br = self.f.ws.create(rid)
+        return rid, wt, br
+
+
+# ===================================================================== implement
+
+class ImplementLoop(Loop):
+    name = "implement"
+    _pick = threading.Lock()
+
+    def refresh_backlog(self) -> None:
+        cmd = self.cfg.implement.backlog_command
+        if not cmd:
+            return
+        view = self.f.main_view()
+        code, out, _, _ = run_cmd(cmd, view, 600)
+        if code != 0:
+            self.log("error", f"backlog command failed: {out[-500:]}")
+            return
+        out = out.strip()
+        try:
+            items = json.loads(out)
+            items = [i if isinstance(i, str) else (i.get("id") or json.dumps(i)) for i in items]
+        except json.JSONDecodeError:
+            items = [l.strip() for l in out.splitlines() if l.strip()]
+        now = time.time()
+        current = set(items)
+        for it in items:
+            self.store.x("INSERT OR IGNORE INTO backlog (item, status, attempts, updated) VALUES (?, 'open', 0, ?)",
+                         (it, now))
+        for r in self.store.q("SELECT item FROM backlog WHERE status IN ('open','blocked')"):
+            if r["item"] not in current:
+                self.store.x("UPDATE backlog SET status = 'done', updated = ? WHERE item = ?", (now, r["item"]))
+
+    def take(self) -> str | None:
+        with self._pick:
+            self.refresh_backlog()
+            briefs = self.store.take_briefs(self.name)
+            if briefs:
+                item = "brief: " + briefs[0][:200]
+                self.store.x("INSERT OR REPLACE INTO backlog (item, status, attempts, updated, note) "
+                             "VALUES (?, 'running', 0, ?, ?)", (item, time.time(), briefs[0]))
+                for b in briefs[1:]:
+                    self.store.x("INSERT INTO briefs (loop, text, status, ts) VALUES (?, ?, 'open', ?)",
+                                 (self.name, b, time.time()))
+                return item
+            r = self.store.q("SELECT item FROM backlog WHERE status = 'open' ORDER BY updated LIMIT 1")
+            if not r:
+                return None
+            self.store.x("UPDATE backlog SET status = 'running', updated = ? WHERE item = ?", (time.time(), r[0]["item"]))
+            return r[0]["item"]
+
+    def worker(self, i: int):
+        if not self.wait_unpaused():
+            return False
+        item = self.take()
+        if item is None:
+            self.stop.wait(120)
+            return
+        note = self.store.q("SELECT note FROM backlog WHERE item = ?", (item,))[0]["note"]
+        task = note if item.startswith("brief: ") and note else f"Close this open item of the contract:\n\n{item}"
+        out = self.cycle(self.cfg.implement.role, task, max_attempts=self.cfg.implement.max_attempts)
+        status = {"merged": "done", "no-change": "open"}.get(out.status, "blocked")
+        self.store.x("UPDATE backlog SET status = ?, attempts = attempts + 1, run_id = ?, updated = ?, note = ? "
+                     "WHERE item = ?", (status, out.run_ids[-1] if out.run_ids else None, time.time(),
+                                        out.summary[:2000], item))
+        self.log("item-" + status, f"{item[:120]}: {out.status} - {out.summary[:300]}",
+                 out.run_ids[-1] if out.run_ids else None)
+
+
+# ===================================================================== optimize
+
+class OptimizeLoop(Loop):
+    name = "optimize"
+
+    def measure(self, root: Path) -> float | None:
+        b = self.cfg.benchmark
+        vals = []
+        for _ in range(max(1, b.repeats)):
+            code, out, _, to = run_cmd(b.command, root, b.timeout_minutes * 60, self.cfg.limits.nice)
+            m = re.search(b.metric, out)
+            if code != 0 or to or not m:
+                self.log("bench-error", f"benchmark failed in {root.name}: {out[-400:]}")
+                return None
+            vals.append(float(m.group(1)))
+        return statistics.median(vals)
+
+    def baseline(self) -> float | None:
+        main = sha(self.cfg.project.repo, self.cfg.project.main_branch)
+        key = f"baseline:{main}"
+        cached = self.store.flag(key)
+        if cached:
+            return float(cached)
+        v = self.measure(self.f.main_view())
+        if v is not None:
+            self.store.set_flag(key, str(v))
+        return v
+
+    def better(self, base: float, cand: float) -> float:
+        gain = (base - cand) / base if self.cfg.benchmark.direction == "lower" else (cand - base) / base
+        return gain * 100
+
+    def worker(self, i: int):
+        if not self.wait_unpaused():
+            return False
+        base = self.baseline()
+        if base is None:
+            self.stop.wait(600)
+            return
+        hist = self.store.q("SELECT idea, baseline, candidate, kept, reason FROM experiments ORDER BY id DESC LIMIT ?",
+                            (self.cfg.optimize.history,))
+        lines = [f"- {'KEPT' if h['kept'] else 'reverted'}: {h['idea']} ({h['baseline']} -> {h['candidate']}; {h['reason']})"
+                 for h in hist] or ["- (no experiments yet)"]
+        briefs = self.store.take_briefs(self.name)
+        task = (f"Current benchmark on main: {base} ({self.cfg.benchmark.direction} is better; a change must improve it "
+                f"by at least {self.cfg.benchmark.min_improvement_pct}%).\n\nHistory, newest first:\n" + "\n".join(lines)
+                + ("\n\nGuidance from the coordinator:\n" + "\n".join(briefs) if briefs else ""))
+        seen: dict = {}
+
+        def accept(r: RunResult, wt: Path):
+            cand = self.measure(wt)
+            seen["cand"] = cand
+            if cand is None:
+                return False, "benchmark failed on the candidate"
+            gain = self.better(base, cand)
+            seen["gain"] = gain
+            if gain < self.cfg.benchmark.min_improvement_pct:
+                return False, f"not faster enough: {base} -> {cand} ({gain:+.2f}%)"
+            return True, ""
+
+        out = self.cycle(self.cfg.optimize.role, task, max_attempts=2, result_extra=', "idea": "<one line>"',
+                         accept=accept)
+        idea = (out.result or {}).get("idea") or out.summary[:200]
+        reason = out.summary if not out.ok else f"{seen.get('gain', 0):+.2f}%"
+        self.store.x("INSERT INTO experiments (run_id, idea, baseline, candidate, kept, reason, ts) VALUES (?,?,?,?,?,?,?)",
+                     (out.run_ids[-1] if out.run_ids else None, idea, base, seen.get("cand"), int(out.ok),
+                      reason[:500], time.time()))
+        self.log("experiment-kept" if out.ok else "experiment-reverted", f"{idea[:150]}: {reason[:200]}",
+                 out.run_ids[-1] if out.run_ids else None)
+
+
+# ===================================================================== audit
+
+SEVERITIES = ("critical", "high", "medium", "low")
+FINDINGS_EXTRA = (', "findings": [{"title": "...", "severity": "critical|high|medium|low", '
+                  '"description": "...", "reproducer": "..."}]')
+
+
+class AuditLoop(Loop):
+    name = "audit"
+
+    def worker(self, i: int):
+        a = self.cfg.audit
+        last = self.store.q("SELECT * FROM rounds ORDER BY n DESC LIMIT 1")
+        n = (last[0]["n"] + 1) if last else 1
+        if n > a.max_rounds:
+            self.log("audit-done", f"reached max_rounds={a.max_rounds}; the audit loop stops")
+            return False
+        if not self.wait_unpaused():
+            return False
+        repo, main = self.cfg.project.repo, self.cfg.project.main_branch
+        base = sha(repo, main)
+        prev_base = last[0]["base_commit"] if last else None
+        self.store.x("INSERT INTO rounds (n, started, base_commit, status) VALUES (?,?,?, 'auditing')", (n, time.time(), base))
+        self.log("round-start", f"audit round {n} on {base[:10]} with fresh auditors: {', '.join(a.flavors)}")
+
+        # 1. fresh auditors, in parallel; each in its own worktree of main
+        def audit(flavor_role):
+            flavor, role = flavor_role
+            rid, wt, br = self.fresh_tree(role)
+            try:
+                task = f"Audit round {n}, flavor: {flavor}. Main is at {base}."
+                if flavor == "regression":
+                    since = prev_base or git(repo, "rev-list", "--max-parents=0", main).splitlines()[0]
+                    changes = git(repo, "log", "--stat", "--format=%n%h %s", f"{since}..{main}", check=False)
+                    task += f"\n\nChanges on main since the last round ({since[:10]}..{base[:10]}):\n{changes[-20000:]}"
+                briefs = self.store.take_briefs(self.name)
+                if briefs:
+                    task += "\n\nGuidance from the coordinator:\n" + "\n".join(briefs)
+                r = self.f.runner.run(role, task, loop=self.name, worktree=wt, branch=br, run_id=rid,
+                                      result_extra=FINDINGS_EXTRA)
+                return flavor, r
+            finally:
+                self.f.ws.remove(wt, delete_branch=br)
+
+        with ThreadPoolExecutor(max_workers=len(a.flavors) or 1) as ex:
+            results = list(ex.map(audit, a.flavors.items()))
+        ids = []
+        for flavor, r in results:
+            for fd in (r.result.get("findings") or []):
+                sev = str(fd.get("severity", "medium")).lower()
+                fid = self.store.x("INSERT INTO findings (round, flavor, run_id, title, severity, description, "
+                                   "reproducer, status, created) VALUES (?,?,?,?,?,?,?, 'new', ?)",
+                                   (n, flavor, r.run_id, str(fd.get("title", ""))[:300],
+                                    sev if sev in SEVERITIES else "medium", str(fd.get("description", "")),
+                                    str(fd.get("reproducer", "")), time.time()))
+                ids.append(fid)
+        self.log("findings", f"round {n}: {len(ids)} findings from {len(results)} auditors")
+
+        # 2. the judge: reachable through the public API?
+        if ids:
+            self.judge(n, ids)
+        # 3. fixers, in parallel, through the gate
+        to_fix = self.store.q("SELECT * FROM findings WHERE round = ? AND status = 'fix' ORDER BY "
+                              "CASE severity WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END", (n,))
+        self.store.x("UPDATE rounds SET status = 'fixing' WHERE n = ?", (n,))
+        with ThreadPoolExecutor(max_workers=max(1, a.fixers)) as ex:
+            list(ex.map(self.fix, to_fix))
+        # 4. document the unreachable ones and restamp the evidence, through the gate as well
+        counts = self.restamp(n, base)
+        crit = counts.get("reachable_critical", 0)
+        self.store.x("UPDATE rounds SET ended = ?, counts = ?, status = 'done' WHERE n = ?",
+                     (time.time(), json.dumps(counts), n))
+        self.log("round-end", f"audit round {n}: {json.dumps(counts)}")
+        # 5. one more round?
+        if a.confirm_each_round:
+            did = self.store.ask(f"Audit round {n} is merged ({crit} critical reachable findings, "
+                                 f"{counts.get('fixed', 0)} fixed). Run another round?", ["yes", "no"])
+            while not self.stop.is_set():
+                ans = self.store.answer(did)
+                if ans:
+                    if ans.strip().lower() not in ("yes", "y"):
+                        self.log("audit-done", f"human said no more rounds after round {n}")
+                        return False
+                    break
+                self.stop.wait(30)
+        elif crit <= a.stop_when_critical_at_most:
+            self.log("audit-done", f"round {n} found {crit} critical reachable findings: converged")
+            return False
+
+    def judge(self, n: int, ids: list[int]) -> None:
+        rows = self.store.q(f"SELECT * FROM findings WHERE id IN ({','.join('?' * len(ids))})", ids)
+        listing = "\n\n".join(f"## Finding {r['id']} ({r['flavor']}, claimed {r['severity']}): {r['title']}\n\n"
+                              f"{r['description']}\n\nReproducer:\n```\n{r['reproducer'][:6000]}\n```" for r in rows)
+        rid, wt, br = self.fresh_tree(self.cfg.audit.judge)
+        try:
+            r = self.f.runner.run(self.cfg.audit.judge, f"Round {n} findings:\n\n{listing}", loop=self.name,
+                                  worktree=wt, branch=br, run_id=rid,
+                                  result_extra=', "verdicts": [{"id": 0, "reachable": true, "severity": "...", "reason": "..."}]')
+        finally:
+            self.f.ws.remove(wt, delete_branch=br)
+        verdicts = {int(v.get("id", -1)): v for v in (r.result.get("verdicts") or []) if str(v.get("id", "")).isdigit()
+                    or isinstance(v.get("id"), int)}
+        for row in rows:
+            v = verdicts.get(row["id"])
+            if v is None:   # unjudged: be safe, treat as reachable
+                v = {"reachable": True, "reason": "the judge gave no verdict; treated as reachable"}
+            sev = str(v.get("severity") or row["severity"]).lower()
+            self.store.x("UPDATE findings SET status = ?, verdict = ?, severity = ? WHERE id = ?",
+                         ("fix" if v.get("reachable") else "documented", json.dumps(v),
+                          sev if sev in SEVERITIES else row["severity"], row["id"]))
+
+    def fix(self, row) -> None:
+        task = (f"Finding {row['id']} (audit round {row['round']}, {row['flavor']}, {row['severity']}): {row['title']}\n\n"
+                f"{row['description']}\n\nReproducer:\n```\n{row['reproducer'][:8000]}\n```\n\n"
+                f"Judge's verdict: {row['verdict']}")
+        out = self.cycle(self.cfg.audit.fixer, task, max_attempts=3)
+        self.store.x("UPDATE findings SET status = ?, fix_run = ? WHERE id = ?",
+                     ("fixed" if out.ok else "open", out.run_ids[-1] if out.run_ids else None, row["id"]))
+        self.log("fixed" if out.ok else "fix-failed", f"finding {row['id']} {row['title'][:120]}: {out.status}",
+                 out.run_ids[-1] if out.run_ids else None)
+
+    def restamp(self, n: int, base: str) -> dict:
+        rows = self.store.q("SELECT * FROM findings WHERE round = ?", (n,))
+        counts: dict = {"findings": len(rows)}
+        for r in rows:
+            counts[r["status"]] = counts.get(r["status"], 0) + 1
+            reachable = r["status"] in ("fix", "fixed", "open")
+            if reachable and r["severity"] == "critical":
+                counts["reachable_critical"] = counts.get("reachable_critical", 0) + 1
+        rid, wt, br = self.fresh_tree("evidence")
+        try:
+            documented = [r for r in rows if r["status"] == "documented"]
+            if documented:
+                kl = wt / self.cfg.audit.known_limitations_file
+                text = kl.read_text() if kl.exists() else "# Known limitations\n\nFindings judged not reachable through the public API.\n"
+                for r in documented:
+                    why = json.loads(r["verdict"] or "{}").get("reason", "")
+                    text += f"\n## Round {n}, finding {r['id']} ({r['flavor']}): {r['title']}\n\n{r['description'][:3000]}\n\nWhy not reachable: {why}\n"
+                kl.write_text(text)
+            ev = wt / self.cfg.audit.evidence_file
+            main = sha(self.cfg.project.repo, self.cfg.project.main_branch)
+            g = self.store.q("SELECT * FROM gates WHERE status = 'green' ORDER BY id DESC LIMIT 1")
+            stamp = (f"\n## Audit round {n}\n\n- main before the round: `{base}`\n- main after the fixes: `{main}`\n"
+                     f"- last green gate: #{g[0]['id'] if g else '-'}\n- counts: `{json.dumps(counts)}`\n")
+            for r in rows:
+                stamp += f"- [{r['status']}] {r['flavor']}/{r['severity']}: {r['title'][:160]}\n"
+            ev.write_text((ev.read_text() if ev.exists() else "# Audit evidence\n") + stamp)
+            self.f.ws.commit_pending(wt, f"audit round {n}: evidence and known limitations")
+            v = self.f.gate.submit(br, None, f"audit round {n} evidence")
+            counts["evidence_gate"] = "green" if v.ok else f"red: {v.reason}"
+        finally:
+            self.f.ws.remove(wt, delete_branch=br)
+        return counts
+
+
+LOOPS = {"implement": ImplementLoop, "optimize": OptimizeLoop, "audit": AuditLoop}

@@ -1,0 +1,196 @@
+# formal-factory
+
+A software factory for **formal programs**: code that comes with machine-checked proofs that it
+does what a frozen specification says, for every input. Agents produce code and proofs, a proof
+checker keeps score, and a deterministic gate decides what reaches `main`. You talk to one
+coordinator agent; everything else runs in the background.
+
+It is the machinery described in
+[Creating a "formal programs" factory and making a formal program of SSZ with it](https://x.com/GiulioRebuffo/status/2106866465622356201),
+as a reusable Python package, for **Bend 2** or **Lean 4** targets.
+
+```
+            questions and decisions                     git push            green
+   me  <---------------------------->  coordinator  ...........>  gate  -----------> main
+                                        |      ^                    ^ red: back to the agent
+                                 briefs |      | reports            |
+                                        v      |                    |
+        +--------------------------------------------------------------------------+
+        |  implementers   optimizer   auditors (fresh each round)   judge   fixers  |
+        |   (each worker may start, steer and wait for its own subagents)          |
+        +--------------------------------------------------------------------------+
+```
+
+## The loops
+
+**Implement.** Pick an open item (a missing law, an unimplemented type) from your backlog
+command. Edit a *generator*, regenerate everything, check, and make sure no frozen
+statement moved. Then the gate. A red gate goes back to the same agent with the gate's log.
+
+**Optimize** (autoresearch with a veto). One change, benchmarked on one number. It's kept
+only if the number improves by `min_improvement_pct` *and* every proof, unit test and
+vector still passes; otherwise it's reverted. The history of experiments goes into the
+next optimizer's prompt.
+
+**Audit.** Each round gets *fresh* auditors that have never seen the code, in three flavors:
+- **mutation:** plant plausible mistakes and see whether a proof complains;
+- **crash:** hostile input through the public API;
+- **regression:** what did the last fixes quietly weaken?
+
+A **judge** asks one question per finding: can a real caller reach this through the public
+API? If yes, a **fixer** adds a law or fixes the code (through the gate). If not, the
+finding is documented in `KNOWN_LIMITATIONS.md`. The round ends by re-stamping
+`EVIDENCE.md` through the gate. Then the factory asks you whether to run one more round,
+or stops when critical findings reach zero.
+
+## The gate
+
+Deterministic Python, not an agent, so it can't be talked into a shortcut. For each
+candidate branch:
+
+1. The candidate must contain the current `main`. Stale candidates are rebased and
+   resubmitted automatically; real conflicts go back to the agent.
+2. Cold: a fresh clone, no caches.
+3. The lock file is untouched. Only the gate writes it, and it is always read from `main`.
+4. Regenerate everything. The tree must be byte-identical to what was committed, so
+   nobody hand-edits generated files.
+5. Frozen statements are unchanged, or the change is recorded in `frozen_changes.yaml`
+   with a reason **and the name of a proof that the new statement implies the old**. That
+   proof is checked like everything else.
+6. Nothing forbidden appears. Every file checks, each within its time budget. Plus
+   language extras:
+   - Bend: optional `--verdict` kernel recheck.
+   - Lean: `#print axioms` on every frozen theorem, against an allowlist, so a hidden
+     `sorry` fails.
+7. Unit tests, test vectors and runtime tests pass.
+8. Green: new statements are added to the lock, and `main` moves to exactly that tree
+   (compare-and-swap); it's pushed if a remote is configured. A remote build server is
+   supported (`gate.host: user@host` runs `ff gate-run` there), but not yet tested.
+
+Agents run the same checks in their worktree with `ff check`.
+
+### Frozen statements
+
+What counts as a statement depends on the language:
+- **Bend:** every top-level `law` block. In frozen spec files, also every `def`/`type`.
+- **Lean:** every `theorem`/`lemma` up to its `:=`, so proofs may change but statements
+  may not. Every other declaration is frozen in full.
+
+`ff freeze --yes` is the human step that locks the initial spec on `main`. After that, only
+the gate writes the lock.
+
+## Agents: Claude, GPT, GLM
+
+Every role picks a provider in `factory.yaml`:
+
+| Provider kind | Launched as | Steering |
+|---|---|---|
+| `claude` (Claude Code) | `claude -p --input-format stream-json --output-format stream-json` | messages are written into the live session as new user turns |
+| `codex` (GPT via Codex) | `codex exec --json` | `ff inbox` during the run; what is left is delivered by `codex exec resume <session>` |
+| GLM | `kind: claude` with `ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_MODEL` env vars (an Anthropic-compatible endpoint) | as Claude |
+| `script` | any command | `ff inbox` |
+
+Each run gets:
+- its own git worktree and branch;
+- a run directory with the prompt, the raw transcript and the result;
+- token and cost accounting (`ff bill`);
+- a timeout, and a stop flag that any process can set.
+
+### Subagents
+
+Codex has no native subagents, and a subagent may want a *different* model than its parent
+(a Claude fixer asking a GLM attacker), so the factory provides subagents itself. A role
+lists the roles it may use:
+
+```yaml
+roles:
+  fixer:
+    provider: claude
+    subagents: [explorer, prover, attacker]
+```
+
+Inside its run, the worker uses:
+
+```
+ff subagent start attacker "try to break the fix in src/decode.bend"   # -> run id
+ff subagent steer <id> "focus on the length prefix"
+ff subagent wait <id>        # or: ff subagent run <role> "<task>" (start + wait)
+ff subagent status | stop <id>
+```
+
+Subagents run in the parent's worktree (or `--own-worktree`), on their own provider. They're
+depth-limited (`max_subagent_depth`) and can be steered by their parent or through the API.
+
+## The steering API
+
+`ff run --api 127.0.0.1:8787` (or `ff serve`) starts the HTTP API. Every request needs
+`Authorization: Bearer $FF_API_TOKEN` (a random token is printed if it's unset).
+
+```
+POST /agents                {"role": "fixer", "task": "..."}          -> {"run_id"}
+POST /runs/<id>/steer       {"message": "...", "cascade": false}     the agent, or the agent and all its live subagents
+POST /runs/<id>/stop        {"cascade": true}
+GET  /runs/<id>             result, usage, children, messages, transcript tail
+GET  /runs/<id>/tree        the run and its descendants
+GET  /status | /events?since= | /runs?status=running | /findings | /decisions
+POST /briefs {"loop","text"} | /decisions/<id> {"answer"} | /loops/<loop>/pause|resume
+```
+
+So you steer one agent, and that agent steers its subagents with `ff subagent steer`, or
+you cascade the message to all of them.
+
+## The coordinator
+
+`ff chat` opens the coordinator role as an interactive session in the factory's state
+directory. Its tools are the `ff` commands:
+- `ff status`
+- `ff events --since 10h`
+- `ff runs`, `ff show`, `ff tail`
+- `ff findings`, `ff gates`, `ff experiments`, `ff bill`
+- `ff steer`, `ff brief`, `ff pause`/`ff resume`, `ff decide`
+
+Ask it "what did we fix in the last 10 hours?" or "why is fixer A taking so long?".
+
+## Configuration
+
+One file configures everything: the target repo and language, the checker, the commands
+(regenerate, unit tests, vectors, runtime tests), the frozen globs, the benchmark, the gate,
+the providers, every role (provider, model, prompt, timeout, subagents, env, args), the
+loops and the limits. See `examples/factory.bend.yaml` and `examples/factory.lean.yaml`.
+`ff init --language lean` copies one; `ff validate` checks it.
+
+Role prompts default to the built-in ones in `ff/roles/*.md`. Any role can override its
+prompt inline or with a file. `${VAR}` in the YAML is read from the environment, so API keys
+stay out of the file.
+
+## Running it
+
+```sh
+pip install -e .            # Python 3.11+, pyyaml
+ff init --language bend     # then edit factory.yaml
+ff validate
+ff freeze --yes             # lock the human-written spec on main
+ff run --api 127.0.0.1:8787 # the loops, in the background (nohup/tmux)
+ff chat                     # talk to the coordinator
+```
+
+`project.repo` should be the factory's own clone of the target. Agents never touch its
+checkout; only the gate moves `main` there (and pushes it).
+
+## Tests
+
+```sh
+pip install -e '.[test]'
+FF_TEST_BEND=/path/to/bend pytest -q
+```
+
+The end-to-end tests run a toy Bend project with a deterministic fake agent (`tests/fake_agent.py`)
+and cover:
+- the gate refuses a weakened frozen law and a hand-edited generated file, and accepts the
+  generator fix;
+- a full audit round: fresh auditors, then the judge, then parallel fixers (including a
+  rebase conflict), then evidence and known limitations merged through the gate, with the
+  new laws locked;
+- the API steering an agent that relays the message to its own subagent.
+
+The real Claude Code and Codex paths were also checked by hand, each steered mid-run.

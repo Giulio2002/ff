@@ -1,0 +1,331 @@
+"""factory.yaml: one file configures the target, the checker, every provider and every agent role.
+
+Strings may reference environment variables as ${NAME} or ${NAME:-default}; they are
+expanded at load time, so API keys never have to live in the file.
+"""
+from __future__ import annotations
+
+import os
+import re
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+LANGUAGES = ("bend", "lean")
+PROVIDER_KINDS = ("claude", "codex", "script")
+FLAVORS = ("mutation", "crash", "regression")
+
+
+class ConfigError(ValueError):
+    pass
+
+
+_ENV = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
+
+
+def _expand(value: Any) -> Any:
+    if isinstance(value, str):
+        return _ENV.sub(lambda m: os.environ.get(m.group(1), m.group(2) or ""), value)
+    if isinstance(value, list):
+        return [_expand(v) for v in value]
+    if isinstance(value, dict):
+        return {k: _expand(v) for k, v in value.items()}
+    return value
+
+
+def _take(d: dict, key: str, default: Any = None, *, required: bool = False, where: str = "") -> Any:
+    if key in d:
+        return d[key]
+    if required:
+        raise ConfigError(f"{where}: missing required key '{key}'")
+    return default
+
+
+def _no_extra(d: dict, allowed: set[str], where: str) -> None:
+    extra = set(d) - allowed
+    if extra:
+        raise ConfigError(f"{where}: unknown key(s) {sorted(extra)} (allowed: {sorted(allowed)})")
+
+
+@dataclass
+class Project:
+    name: str
+    repo: Path                 # the target git repository (the factory never edits its main checkout)
+    main_branch: str = "main"
+    remote: str | None = None  # push main here after every green gate when set
+    language: str = "bend"
+    state_dir: Path = Path()   # runs, worktrees, transcripts, the sqlite store
+
+
+@dataclass
+class Provider:
+    """How to launch one agent CLI. kind=claude: Claude Code (`claude -p`); kind=codex: Codex
+    (`codex exec`); kind=script: any command (tests, or a CLI the factory does not know)."""
+    name: str
+    kind: str
+    binary: str
+    model: str | None = None
+    env: dict[str, str] = field(default_factory=dict)
+    args: list[str] = field(default_factory=list)
+    permission_mode: str = "bypassPermissions"   # claude: agents run unattended in their worktree
+    sandbox: str = "danger-full-access"          # codex: the worktree is the sandbox boundary
+    command: list[str] = field(default_factory=list)  # script: argv; {prompt_file} {workdir} {result_file}
+
+
+@dataclass
+class Role:
+    name: str
+    provider: str
+    model: str | None = None          # overrides the provider's model
+    prompt: str = ""                  # template text (a path is read relative to the config file)
+    timeout_minutes: float = 120
+    subagents: list[str] = field(default_factory=list)
+    subagent_only: bool = False       # never scheduled by a loop, only called by other agents
+    max_subagent_depth: int = 2
+    env: dict[str, str] = field(default_factory=dict)
+    args: list[str] = field(default_factory=list)
+
+
+@dataclass
+class Checker:
+    binary: str = ""
+    args: list[str] = field(default_factory=list)
+    files: list[str] = field(default_factory=list)       # globs the checker must accept, all of them
+    file_timeout_seconds: float = 120                    # the per-file budget ("each file under 2 min")
+    enforce_file_budget: bool = True
+    jobs: int = 8
+    ok_marker: str = ""                                  # bend: "ALL PROOFS CHECK"
+    kernel_recheck: bool = False                         # bend: also run --verdict in the gate
+    forbid: list[str] = field(default_factory=list)      # regexes rejected anywhere in checked files
+    allowed_axioms: list[str] = field(default_factory=list)  # lean: #print axioms allowlist
+
+
+@dataclass
+class Spec:
+    frozen: list[str] = field(default_factory=list)      # globs whose statements are frozen
+    lock_file: str = "frozen.lock.json"                  # in the target repo, written only by the gate
+    changes_file: str = "frozen_changes.yaml"            # every allowed change to a frozen statement
+    require_implication_proof: bool = True               # a change must name a checked "new -> old" proof
+
+
+@dataclass
+class Benchmark:
+    command: str = ""
+    metric: str = r"([0-9.]+)"     # regex; group 1 is the number
+    direction: str = "lower"       # lower or higher is better
+    min_improvement_pct: float = 1.0
+    repeats: int = 3
+    timeout_minutes: float = 30
+
+
+@dataclass
+class Gate:
+    host: str = "local"            # or user@host: the gate runs `ff gate-run` there over ssh
+    remote_config: str = ""        # path of factory.yaml on that host
+    cold: bool = True              # fresh clone, no caches
+    regenerate: bool = True
+    keep_failed_trees: int = 5
+
+
+@dataclass
+class ImplementLoop:
+    enabled: bool = True
+    role: str = "implementer"
+    workers: int = 2
+    max_attempts: int = 3
+    backlog_command: str = ""      # prints the open items (one per line, or a JSON list)
+
+
+@dataclass
+class OptimizeLoop:
+    enabled: bool = False
+    role: str = "optimizer"
+    workers: int = 1
+    history: int = 20              # past experiments shown to the next optimizer
+
+
+@dataclass
+class AuditLoop:
+    enabled: bool = True
+    flavors: dict[str, str] = field(default_factory=dict)   # flavor -> role
+    judge: str = "judge"
+    fixer: str = "fixer"
+    fixers: int = 2
+    max_rounds: int = 10
+    stop_when_critical_at_most: int = 0
+    confirm_each_round: bool = True   # ask the human (through the coordinator) before another round
+    known_limitations_file: str = "KNOWN_LIMITATIONS.md"
+    evidence_file: str = "EVIDENCE.md"
+
+
+@dataclass
+class Limits:
+    max_parallel_agents: int = 6
+    nice: int = 19
+
+
+@dataclass
+class Config:
+    path: Path
+    project: Project
+    commands: dict[str, str]
+    generated: list[str]
+    checker: Checker
+    spec: Spec
+    benchmark: Benchmark
+    gate: Gate
+    providers: dict[str, Provider]
+    roles: dict[str, Role]
+    implement: ImplementLoop
+    optimize: OptimizeLoop
+    audit: AuditLoop
+    limits: Limits
+    coordinator: str = "coordinator"
+
+    def role(self, name: str) -> Role:
+        if name not in self.roles:
+            raise ConfigError(f"no role named '{name}'")
+        return self.roles[name]
+
+    def provider_for(self, role: Role) -> Provider:
+        return self.providers[role.provider]
+
+    def model_for(self, role: Role) -> str | None:
+        return role.model or self.providers[role.provider].model
+
+
+DEFAULT_CHECKERS = {
+    "bend": dict(binary="bend", args=["--check-only"], ok_marker="ALL PROOFS CHECK",
+                 forbid=[r"@unsafe"]),
+    "lean": dict(binary="lake", args=["env", "lean"],
+                 forbid=[r"\bsorry\b", r"\badmit\b", r"^\s*axiom\s", r"implemented_by",
+                         r"\bunsafe\b", r"debug\.skipKernelTC", r"\bnative_decide\b"],
+                 allowed_axioms=["propext", "Classical.choice", "Quot.sound"]),
+}
+
+
+def _read_prompt(text_or_path: str, base: Path) -> str:
+    if not text_or_path:
+        return ""
+    p = (base / text_or_path)
+    if "\n" not in text_or_path and len(text_or_path) < 300 and p.is_file():
+        return p.read_text()
+    return text_or_path
+
+
+def load(path: str | os.PathLike) -> Config:
+    path = Path(path).resolve()
+    raw = _expand(yaml.safe_load(path.read_text()) or {})
+    base = path.parent
+    top = {"project", "commands", "generated", "checker", "spec", "benchmark", "gate", "providers",
+           "roles", "loops", "limits", "coordinator"}
+    _no_extra(raw, top, "factory.yaml")
+
+    p = _take(raw, "project", required=True, where="factory.yaml")
+    _no_extra(p, {"name", "repo", "main_branch", "remote", "language", "state_dir"}, "project")
+    language = _take(p, "language", "bend")
+    if language not in LANGUAGES:
+        raise ConfigError(f"project.language must be one of {LANGUAGES}, got '{language}'")
+    name = _take(p, "name", required=True, where="project")
+    repo = (base / _take(p, "repo", required=True, where="project")).resolve()
+    state = Path(_take(p, "state_dir", f"~/.formal-factory/{name}")).expanduser()
+    if not state.is_absolute():
+        state = (base / state).resolve()
+    project = Project(name=name, repo=repo, main_branch=_take(p, "main_branch", "main"),
+                      remote=_take(p, "remote"), language=language, state_dir=state)
+
+    ck = dict(DEFAULT_CHECKERS[language])
+    user_ck = _take(raw, "checker", {}) or {}
+    # `checker:` may be flat or keyed by language (so one file can carry both)
+    if language in user_ck and isinstance(user_ck[language], dict):
+        user_ck = user_ck[language]
+    user_ck = {k: v for k, v in user_ck.items() if k not in LANGUAGES}
+    _no_extra(user_ck, set(Checker.__dataclass_fields__), "checker")
+    ck.update(user_ck)
+    checker = Checker(**ck)
+    if not checker.files:
+        raise ConfigError("checker.files: list the globs of every file the checker must accept")
+
+    spec_raw = _take(raw, "spec", {}) or {}
+    _no_extra(spec_raw, set(Spec.__dataclass_fields__), "spec")
+    spec = Spec(**spec_raw)
+
+    bench_raw = _take(raw, "benchmark", {}) or {}
+    _no_extra(bench_raw, set(Benchmark.__dataclass_fields__), "benchmark")
+    benchmark = Benchmark(**bench_raw)
+    if benchmark.direction not in ("lower", "higher"):
+        raise ConfigError("benchmark.direction must be 'lower' or 'higher'")
+
+    gate_raw = _take(raw, "gate", {}) or {}
+    _no_extra(gate_raw, set(Gate.__dataclass_fields__), "gate")
+    gate = Gate(**gate_raw)
+
+    providers = {}
+    for pname, pr in (_take(raw, "providers", required=True, where="factory.yaml") or {}).items():
+        where = f"providers.{pname}"
+        _no_extra(pr, set(Provider.__dataclass_fields__) - {"name"}, where)
+        kind = _take(pr, "kind", required=True, where=where)
+        if kind not in PROVIDER_KINDS:
+            raise ConfigError(f"{where}.kind must be one of {PROVIDER_KINDS}")
+        binary = _take(pr, "binary", {"claude": "claude", "codex": "codex", "script": ""}[kind])
+        prov = Provider(name=pname, kind=kind, binary=binary,
+                        **{k: v for k, v in pr.items() if k not in ("kind", "binary")})
+        prov.env = {k: str(v) for k, v in prov.env.items()}
+        if kind == "script" and not prov.command:
+            raise ConfigError(f"{where}: a script provider needs `command`")
+        providers[pname] = prov
+
+    roles = {}
+    for rname, rr in (_take(raw, "roles", required=True, where="factory.yaml") or {}).items():
+        where = f"roles.{rname}"
+        _no_extra(rr, set(Role.__dataclass_fields__) - {"name"}, where)
+        role = Role(name=rname, **rr)
+        if role.provider not in providers:
+            raise ConfigError(f"{where}.provider '{role.provider}' is not defined under providers")
+        role.prompt = _read_prompt(role.prompt, base)
+        role.env = {k: str(v) for k, v in role.env.items()}
+        roles[rname] = role
+    for role in roles.values():
+        for s in role.subagents:
+            if s not in roles:
+                raise ConfigError(f"roles.{role.name}.subagents: no role named '{s}'")
+
+    loops = _take(raw, "loops", {}) or {}
+    _no_extra(loops, {"implement", "optimize", "audit"}, "loops")
+
+    def mk(cls, key):
+        d = loops.get(key, {}) or {}
+        _no_extra(d, set(cls.__dataclass_fields__), f"loops.{key}")
+        return cls(**d)
+
+    implement, optimize, audit = mk(ImplementLoop, "implement"), mk(OptimizeLoop, "optimize"), mk(AuditLoop, "audit")
+    for flavor in audit.flavors:
+        if flavor not in FLAVORS:
+            raise ConfigError(f"loops.audit.flavors: unknown flavor '{flavor}' (known: {FLAVORS})")
+    used = []
+    if implement.enabled:
+        used.append(implement.role)
+    if optimize.enabled:
+        used.append(optimize.role)
+        if not benchmark.command:
+            raise ConfigError("loops.optimize is enabled but benchmark.command is empty")
+    if audit.enabled:
+        used += list(audit.flavors.values()) + [audit.judge, audit.fixer]
+    coordinator = _take(raw, "coordinator", "coordinator")
+    for r in used + [coordinator]:
+        if r not in roles:
+            raise ConfigError(f"a loop or the coordinator uses role '{r}', which is not under roles")
+
+    lim_raw = _take(raw, "limits", {}) or {}
+    _no_extra(lim_raw, set(Limits.__dataclass_fields__), "limits")
+
+    commands = _take(raw, "commands", {}) or {}
+    _no_extra(commands, {"regenerate", "unit_tests", "vectors", "runtime_tests"}, "commands")
+
+    return Config(path=path, project=project, commands=commands,
+                  generated=_take(raw, "generated", []) or [], checker=checker, spec=spec,
+                  benchmark=benchmark, gate=gate, providers=providers, roles=roles,
+                  implement=implement, optimize=optimize, audit=audit, limits=Limits(**lim_raw),
+                  coordinator=coordinator)
