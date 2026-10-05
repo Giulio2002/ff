@@ -453,3 +453,24 @@ def test_a_restarted_daemon_adopts_a_run_that_is_still_going(tmp_path):
     assert f2.store.q("SELECT status FROM backlog WHERE item = ?", (item,))[0]["status"] == "done"
     assert any(e["kind"] == "adopted" for e in f2.store.events())
     assert "Nat.add(a,b)" in git(repo, "show", "main:src/add.bend")
+
+
+def test_steering_a_finished_run_resumes_its_session(tmp_path, monkeypatch):
+    monkeypatch.setenv("FF_AGENTS_HOME", str(tmp_path / "agents"))
+    repo = make_project(tmp_path, bug=False)
+    p = write_config(tmp_path, repo)
+    import yaml
+    c = yaml.safe_load(p.read_text())
+    c["providers"]["claude"] = {"kind": "claude", "binary": str(ROOT / "tests/fake_claude.py"),
+                                "env": {"CLAUDE_CONFIG_DIR": str(tmp_path / "cfg")}}
+    c["roles"]["worker"] = {"provider": "claude", "timeout_minutes": 2}
+    p.write_text(yaml.safe_dump(c))
+    f = Factory.from_path(p)
+    wt, br = f.ws.create("cont")
+    r = f.runner.run("worker", "first task", loop="adhoc", worktree=wt, branch=br)
+    assert r.status == "done" and r.result["resumed"] is False
+    new = f.runner.steer(r.run_id, "one more thing", sender="human")
+    assert len(new) == 1 and new[0] != r.run_id
+    r2 = f.runner.wait(new[0], timeout=60, poll=0.3)
+    assert r2.status == "done", r2
+    assert r2.result["resumed"] is True and "one more thing" in r2.result["first_message"], r2.result

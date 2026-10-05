@@ -367,7 +367,11 @@ def cmd_steer(a):
         print("no such run", file=sys.stderr)
         return 1
     sender = os.environ.get("FF_RUN_ID", "human")
-    print("delivered to: " + ", ".join(f.runner.steer(a.run, a.text, sender=sender, cascade=a.cascade)))
+    ids = f.runner.steer(a.run, a.text, sender=sender, cascade=a.cascade)
+    if ids and ids[0] != a.run:
+        print(f"{a.run} had finished: continued as {ids[0]} (same session, same worktree)")
+    else:
+        print("delivered to: " + ", ".join(ids))
 
 
 def cmd_stop(a):
@@ -610,7 +614,12 @@ def cmd_subagent(a):
         r = f.runner.wait(a.run, a.timeout)
         _print_json({"run_id": a.run, "status": r.status, "summary": r.summary, "result": r.result})
     elif a.action == "steer":
-        print("delivered to: " + ", ".join(f.runner.steer(a.run, a.text, sender=me, cascade=a.cascade)))
+        ids = f.runner.steer(a.run, a.text, sender=me, cascade=a.cascade)
+        if ids and ids[0] != a.run:
+            print(f"{a.run} had finished: continued as {ids[0]} (same session, same worktree); "
+                  f"wait for it with `ff subagent wait {ids[0]}`")
+        else:
+            print("delivered to: " + ", ".join(ids))
     elif a.action == "stop":
         print("stopping: " + ", ".join(f.runner.stop(a.run)))
 

@@ -38,7 +38,8 @@ SUBAGENT_TOOLS = """\
 - `ff subagent start <role> "<task>"` start a subagent (returns its run id; it works in your tree
                                       unless you pass --own-worktree)
 - `ff subagent run <role> "<task>"`   start one and wait for its result
-- `ff subagent steer <id> "<text>"`   send a running subagent a message (redirect, narrow, stop early)
+- `ff subagent steer <id> "<text>"`   message a subagent: a running one gets it at once; a finished one is
+                                      continued (same session) as a new run, whose id it prints
 - `ff subagent wait <id>` / `ff subagent status [<id>]` / `ff subagent stop <id>`
   Subagent roles you may use: {subagents}
 """

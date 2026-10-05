@@ -141,7 +141,7 @@ class Runner:
     def run(self, role_name: str, task: str, *, loop: str, worktree: Path, branch: str,
             parent: str | None = None, depth: int = 0, attempt: int = 1, result_extra: str = "",
             extra: dict | None = None, use_slot: bool = True, run_id: str | None = None,
-            detached: bool = False, cycle: dict | None = None) -> RunResult:
+            detached: bool = False, cycle: dict | None = None, resume_session: str | None = None) -> RunResult:
         """Run an agent and return its result. detached=True runs it in a process of its own (the
         loops do), so it outlives a daemon restart and the next daemon can adopt it."""
         role = self.cfg.role(role_name)
@@ -157,7 +157,8 @@ class Runner:
             if detached:
                 self._spawn_runner(run_id, depth)
                 return self.wait(run_id)
-            return self._run(run_id, role, task, loop, worktree, branch, depth, result_extra, extra)
+            return self._run(run_id, role, task, loop, worktree, branch, depth, result_extra, extra,
+                             resume_session=resume_session)
         finally:
             if use_slot:
                 self.slots.release()
@@ -190,7 +191,7 @@ class Runner:
         return self.run(r["role"], r["task"], loop=r["loop"], worktree=Path(r["worktree"]), branch=r["branch"],
                         parent=r["parent"], depth=int(os.environ.get("FF_DEPTH", "1")), use_slot=False,
                         run_id=run_id, attempt=r["attempt"] or 1, result_extra=ex.get("result_extra", ""),
-                        extra=ex.get("extra") or None)
+                        extra=ex.get("extra") or None, resume_session=ex.get("resume_session"))
 
     def wait(self, run_id: str, timeout: float | None = None, poll: float = 2.0) -> RunResult:
         t0 = time.time()
@@ -231,16 +232,41 @@ class Runner:
         return ids
 
     def steer(self, run_id: str, text: str, sender: str = "api", cascade: bool = False) -> list[str]:
+        """Message a run. A running agent gets it in its session; a finished one (done or blocked) is
+        continued: a new run resumes the same session in the same worktree with the message as its
+        next turn (its id is returned in place of the finished one)."""
+        r = self.store.run(run_id)
+        if r is not None and r["status"] in ("done", "blocked"):
+            new = self.continue_run(run_id, text, sender)
+            if new:
+                return [new]
         ids = [run_id] + ([k["id"] for k in self.store.children(run_id, True)
                            if k["status"] not in FINAL] if cascade else [])
         for i in ids:
             self.store.send(i, text if i == run_id else f"(forwarded from {sender} via {run_id}) {text}", sender)
         return ids
 
+    def continue_run(self, run_id: str, text: str, sender: str = "api") -> str | None:
+        """Resume a finished run's session as a new run (same role, worktree, branch and parent)."""
+        r = self.store.run(run_id)
+        sid = json.loads(r["result"] or "{}").get("session_id")
+        prov = self.cfg.providers.get(r["provider"])
+        if not sid or prov is None or prov.kind not in ("claude", "codex"):
+            return None
+        new = new_run_id(r["role"])
+        msg = f"[message from {sender}] {text}"
+        self.store.run_start(new, parent=r["parent"], loop=r["loop"], role=r["role"], provider=r["provider"],
+                             model=r["model"], task=msg, branch=r["branch"], worktree=r["worktree"], attempt=1,
+                             status="queued", extra={"resume_session": sid, "continue_of": run_id})
+        self.store.event(r["loop"] or "steer", "continued", f"{run_id} had finished; {new} resumes its session "
+                         f"with the message from {sender}", new)
+        self._spawn_runner(new, int(os.environ.get("FF_DEPTH", "1")))
+        return new
+
     # ---------------------------------------------------------------- the run itself
 
     def _run(self, run_id: str, role: Role, task: str, loop: str, worktree: Path, branch: str, depth: int,
-             result_extra: str, extra: dict | None) -> RunResult:
+             result_extra: str, extra: dict | None, resume_session: str | None = None) -> RunResult:
         prov = self.cfg.provider_for(role)
         model = self.cfg.model_for(role)
         d = self.runs_dir / run_id
@@ -267,7 +293,9 @@ class Runner:
         try:
             if prov.kind in ("claude", "codex"):
                 status, final_text, usage = self._rotating(run_id, loop, prov, role, model, system, user, worktree,
-                                                           env, transcript, d, deadline)
+                                                           env, transcript, d, deadline,
+                                                           resume_session=resume_session,
+                                                           resume_text=task if resume_session else None)
             else:
                 status, final_text, usage = self._script(run_id, prov, role, system, user, worktree, env,
                                                          transcript, d, deadline, result_file)
@@ -322,7 +350,7 @@ class Runner:
         return prov.kind, (list(acc) if isinstance(acc, list) else None)
 
     def _rotating(self, run_id, loop, prov: Provider, role: Role, model, system, user, worktree, env, transcript,
-                  d, deadline):
+                  d, deadline, resume_session: str | None = None, resume_text: str | None = None):
         launch = self._claude if prov.kind == "claude" else self._codex
         spec = self._pool_for(prov)
         acct = None
@@ -333,15 +361,16 @@ class Runner:
                                          loop, "accounts-exhausted", f"every {prov.kind} account is cooling down; "
                                          f"waiting for {n} (until {time.strftime('%H:%M', time.localtime(t))})", run_id))
         total: dict = {}
-        resume = None
+        resume = resume_session
         switches = 0
         while True:
             run_env = dict(env, **(acct.env() if acct else {}))
             if acct:
                 self.store.run_update(run_id, account=acct.name)
-            info: dict = {}
+            info: dict = {"resume_text": resume_text} if resume_text else {}
             status, final_text, usage = launch(run_id, prov, role, model, system, user, worktree, run_env,
                                                transcript, d, deadline, resume=resume, info=info)
+            resume_text = None
             for k, v in usage.items():
                 total[k] = round(total.get(k, 0) + v, 4) if isinstance(v, float) else total.get(k, 0) + v
             if acct:
@@ -447,7 +476,7 @@ class Runner:
                 deliver_pending()
                 time.sleep(2)
 
-        send(CONTINUE if resume else user)
+        send((info.get("resume_text") or CONTINUE) if resume else user)
         self._watchdog(run_id, p, deadline, state)
         threading.Thread(target=poll_inbox, daemon=True).start()
         final_text, usage = "", {}
@@ -519,7 +548,7 @@ class Runner:
         text = system + "\n\n" + user
         if resume:
             argv = [prov.binary, "exec", "resume", resume, *common, *_resume_perm(perm), "-"]
-            text = CONTINUE
+            text = info.get("resume_text") or CONTINUE
         status = "exited"
         while True:
             p = self._spawn(argv, worktree, env, d)
