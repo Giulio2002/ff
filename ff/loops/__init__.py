@@ -200,7 +200,12 @@ class ImplementLoop(Loop):
             return
         note = self.store.q("SELECT note FROM backlog WHERE item = ?", (item,))[0]["note"]
         task = note if item.startswith("brief: ") and note else f"Close this open item of the contract:\n\n{note or item}"
-        out = self.cycle(self.cfg.implement.role, task, max_attempts=self.cfg.implement.max_attempts)
+        try:
+            out = self.cycle(self.cfg.implement.role, task, max_attempts=self.cfg.implement.max_attempts)
+        except Exception:
+            # a crash must not leave the item claimed by nobody
+            self.store.x("UPDATE backlog SET status = 'open', updated = ? WHERE item = ?", (time.time(), item))
+            raise
         status = {"merged": "done", "no-change": "open", "launch-error": "open"}.get(out.status, "blocked")
         self.store.x("UPDATE backlog SET status = ?, attempts = attempts + 1, run_id = ?, updated = ?, note = ? "
                      "WHERE item = ?", (status, out.run_ids[-1] if out.run_ids else None, time.time(),
