@@ -693,7 +693,7 @@ def cmd_chat(a):
     cfg = load(a.config)
     role = cfg.role(cfg.coordinator)
     prov = cfg.provider_for(role)
-    text = (role.prompt or default_prompt("coordinator")).format_map(_Safe(project=cfg.project.name))
+    text = _Safe(project=cfg.project.name).format_text(role.prompt or default_prompt("coordinator"))
     env = dict(os.environ, **prov.env, **role.env, FF_CONFIG=str(cfg.path))
     env["PATH"] = str(ff_bin(cfg.project.state_dir)) + os.pathsep + env.get("PATH", "")
     model = cfg.model_for(role)

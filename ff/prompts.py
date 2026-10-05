@@ -1,6 +1,7 @@
 """Prompt assembly: the factory preamble every agent gets, then its role prompt, then the task."""
 from __future__ import annotations
 
+import re
 from importlib import resources
 
 from .config import Config, Role
@@ -93,6 +94,19 @@ class _Safe(dict):
     def __missing__(self, key):
         return "{" + key + "}"
 
+    def format_text(self, text: str) -> str:
+        """Fill the known {name} placeholders and leave every other brace alone: prompts about code
+        and proofs are full of braces (`{a == b : Nat}`, `CALC{...}`), which str.format would choke
+        on. `{{` and `}}` still stand for literal braces."""
+        def sub(m):
+            if m.group(0) == "{{":
+                return "{"
+            if m.group(0) == "}}":
+                return "}"
+            key = m.group(1)
+            return str(self[key]) if key in self else m.group(0)
+        return re.sub(r"\{\{|\}\}|\{([A-Za-z_][A-Za-z0-9_]*)\}", sub, text)
+
 
 def build(cfg: Config, role: Role, task: str, *, worktree: str, branch: str, result_file: str,
           result_extra: str = "", extra: dict | None = None) -> tuple[str, str]:
@@ -121,7 +135,7 @@ def build(cfg: Config, role: Role, task: str, *, worktree: str, branch: str, res
         references=_references(cfg, role),
         **(extra or {}))
     if role.subagents:
-        vals["subagent_tools"] = SUBAGENT_TOOLS.format_map(vals)
-    system = PREAMBLE.format_map(vals) + STEERING
-    role_text = (role.prompt or default_prompt(role.name)).format_map(vals)
+        vals["subagent_tools"] = vals.format_text(SUBAGENT_TOOLS)
+    system = vals.format_text(PREAMBLE) + STEERING
+    role_text = vals.format_text(role.prompt or default_prompt(role.name))
     return system, role_text.rstrip() + "\n\n# Your task\n\n" + task.strip() + "\n"

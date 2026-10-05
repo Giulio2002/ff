@@ -400,3 +400,17 @@ def test_resume_all_clears_every_pause(tmp_path, capsys):
     ff(["--config", str(p), "resume", "all"])
     f = Factory.from_path(p)
     assert not f.store.paused("implement")
+
+
+def test_prompts_with_braces_do_not_crash(tmp_path):
+    repo = make_project(tmp_path, bug=False)
+    p = write_config(tmp_path, repo)
+    import yaml
+    c = yaml.safe_load(p.read_text())
+    c["roles"]["implementer"]["prompt"] = "Use CALC{...} and RING{a == b}; {a == a : Nat}; {} {0}; budget {file_budget}s"
+    p.write_text(yaml.safe_dump(c))
+    from ff import prompts
+    cfg = load(p)
+    system, user = prompts.build(cfg, cfg.role("implementer"), "t", worktree="/w", branch="b", result_file="/r")
+    assert "CALC{...}" in user and "{a == a : Nat}" in user and "budget 120s" in user and "{} {0}" in user
+    assert '"status": "done"' in system
