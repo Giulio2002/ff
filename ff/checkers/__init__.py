@@ -146,13 +146,14 @@ class Bend(Base):
     def extra(self, root: Path, frozen_globs: list[str]) -> list[str]:
         if not self.cfg.kernel_recheck:
             return []
-        problems = []
-        for f in self.files(root):
+        def verdict(f):
             code, out, _, to = run_cmd([self.cfg.binary, str(f.relative_to(root)), "--verdict"], root,
                                        self.cfg.file_timeout_seconds * 20, self.nice, env={"BEND_NO_TELEMETRY": "1"})
-            if code != 0 or to or "SOME PROOFS FAIL" in out:
-                problems.append(f"kernel recheck (--verdict) failed for {f.relative_to(root)}:\n{out[-2000:]}")
-        return problems
+            if code != 0 or to or "ALL PROOFS CHECK" not in out:
+                return f"kernel recheck (--verdict) failed for {f.relative_to(root)}:\n{out[-2000:]}"
+            return None
+        with ThreadPoolExecutor(max_workers=max(1, self.cfg.jobs)) as ex:
+            return [p for p in ex.map(verdict, self.files(root)) if p]
 
 
 class Lean(Base):
