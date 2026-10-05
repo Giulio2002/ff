@@ -66,6 +66,19 @@ def _claude_limit(ev: dict) -> str | None:
     return None
 
 
+def _resume_perm(perm: list[str]) -> list[str]:
+    """`codex exec resume` takes no --sandbox flag: carry the sandbox over as config."""
+    out, i = [], 0
+    while i < len(perm):
+        if perm[i] == "--sandbox":
+            out += ["-c", f"sandbox_mode={json.dumps(perm[i + 1])}"]
+            i += 2
+        else:
+            out.append(perm[i])
+            i += 1
+    return out
+
+
 def _codex_limit(ev: dict) -> str | None:
     if ev.get("type") in ("error", "turn.failed"):
         text = str(ev.get("message") or (ev.get("error") or {}).get("message") or ev)
@@ -454,15 +467,26 @@ class Runner:
                resume: str | None = None, info: dict | None = None):
         info = {} if info is None else info
         last = d / "last_message.txt"
-        perm = (["--dangerously-bypass-approvals-and-sandbox"] if prov.sandbox == "danger-full-access"
-                else ["--sandbox", prov.sandbox])
+        if prov.sandbox == "danger-full-access":
+            perm = ["--dangerously-bypass-approvals-and-sandbox"]
+        else:
+            # A sandboxed agent still has to commit (git's metadata for a worktree lives in the main
+            # repository's .git) and report (its result file, ff note/inbox in the factory's store):
+            # those two places are writable too, nothing else outside the worktree.
+            roots = [str(self.cfg.project.state_dir)]
+            gitdir = subprocess.run(["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+                                    cwd=worktree, capture_output=True, text=True).stdout.strip()
+            if gitdir:
+                roots.append(gitdir)
+            perm = ["--sandbox", prov.sandbox,
+                    "-c", "sandbox_workspace_write.writable_roots=" + json.dumps(roots)]
         common = ["--json", "--skip-git-repo-check", "-o", str(last)] + (["-m", model] if model else [])
         argv = [prov.binary, "exec", *common, "-C", str(worktree), *perm, *prov.args, *role.args, "-"]
         usage: dict = {}
         thread_id = resume
         text = system + "\n\n" + user
         if resume:
-            argv = [prov.binary, "exec", "resume", resume, *common, *perm, "-"]
+            argv = [prov.binary, "exec", "resume", resume, *common, *_resume_perm(perm), "-"]
             text = CONTINUE
         status = "exited"
         while True:
@@ -512,7 +536,7 @@ class Runner:
             # steering that arrived after the turn: resume the same session with it
             text = "\n\n".join(f"[message from {m['sender']}] {m['text']}" for m in msgs)
             self.store.mark_delivered([m["id"] for m in msgs], "resume")
-            argv = [prov.binary, "exec", "resume", thread_id, *common, *perm, "-"]
+            argv = [prov.binary, "exec", "resume", thread_id, *common, *_resume_perm(perm), "-"]
         final_text = last.read_text() if last.exists() else ""
         return status, final_text, usage
 

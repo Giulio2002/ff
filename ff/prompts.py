@@ -21,7 +21,7 @@ Rules of the factory (the gate enforces every one of them; breaking one wastes y
   Never edit `{lock_file}`.
 - Every file in {check_files} must pass the checker within {file_budget}s.
   Forbidden anywhere in them: {forbid}.
-- Commit your work on your branch with clear messages. Do not push; do not touch main.
+- {commit_rule}
 - Before you finish, run `ff check` in your worktree: it regenerates, checks the frozen
   statements and runs the checker the way the gate will (add `--files a b` to check only some).
 
@@ -77,6 +77,11 @@ def build(cfg: Config, role: Role, task: str, *, worktree: str, branch: str, res
         forbid=", ".join(f"/{p}/" for p in cfg.checker.forbid) or "(nothing)",
         result_file=result_file, result_extra=result_extra,
         subagents=", ".join(role.subagents),
+        commit_rule=("Leave your changes in the worktree, uncommitted: your sandbox keeps git's metadata "
+                     "read-only, so the factory commits them for you when you finish (your result's summary "
+                     "is the commit message). Do not push; do not touch main."
+                     if cfg.provider_for(role).kind == "codex" and cfg.provider_for(role).sandbox != "danger-full-access"
+                     else "Commit your work on your branch with clear messages. Do not push; do not touch main."),
         subagent_tools="",
         unit_tests=cfg.commands.get("unit_tests", "(none)"),
         vectors=cfg.commands.get("vectors", "(none)"),
