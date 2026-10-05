@@ -818,7 +818,8 @@ def cmd__run_agent(a):
     row = f.store.run(a.run)
     parent = f.store.run(row["parent"]) if row and row["parent"] else None
     wt = Path(row["worktree"]) if row and row["worktree"] else None
-    if wt and wt.parent == f.ws.root and (parent is None or parent["worktree"] != row["worktree"]):
+    if (wt and wt.parent == f.ws.root and row["loop"] in ("adhoc", "subagent")
+            and (parent is None or parent["worktree"] != row["worktree"])):
         f.ws.remove(wt)
     return 0 if r.status in ("done", "blocked") else 1
 

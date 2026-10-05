@@ -101,6 +101,11 @@ Every role picks a provider in `factory.yaml`:
 | GLM | `kind: claude` with `ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_MODEL` env vars (an Anthropic-compatible endpoint) | as Claude |
 | `script` | any command | `ff inbox` |
 
+Loop agents run in processes of their own, and each run records its cycle (task, attempt,
+backlog item, baseline). Restarting the daemon (new code, new settings) does not kill them: the
+next daemon adopts every run still going and carries its cycle on (commit, gate, retry); only runs
+whose process is gone are stopped and their items reopened.
+
 Each run gets:
 - its own git worktree and branch;
 - a run directory with the prompt, the raw transcript and the result;

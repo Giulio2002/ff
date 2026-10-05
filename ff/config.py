@@ -192,6 +192,7 @@ class Accounts:
 class Limits:
     max_parallel_agents: int = 6
     nice: int = 19
+    detached_agents: bool = True   # loop agents in processes of their own: a daemon restart adopts them
 
 
 @dataclass

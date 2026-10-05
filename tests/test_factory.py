@@ -365,7 +365,7 @@ def test_a_restarted_daemon_stops_the_runs_it_left_behind(tmp_path):
     p = subprocess.Popen(["sleep", "300"], start_new_session=True)
     f.store.run_start("implementer-old", loop="implement", role="implementer", status="running", pid=p.pid)
     f.store.x("INSERT INTO backlog (item, status, attempts, updated) VALUES ('law:x', 'running', 0, 0)")
-    assert f.reconcile() == ["implementer-old"]
+    assert f.reconcile() == ([], ["implementer-old"])   # no cycle recorded: nothing to adopt
     assert p.wait(timeout=10) != 0
     assert f.store.run("implementer-old")["status"] == "stopped"
     assert f.store.q("SELECT status FROM backlog")[0]["status"] == "open"
@@ -414,3 +414,42 @@ def test_prompts_with_braces_do_not_crash(tmp_path):
     system, user = prompts.build(cfg, cfg.role("implementer"), "t", worktree="/w", branch="b", result_file="/r")
     assert "CALC{...}" in user and "{a == a : Nat}" in user and "budget 120s" in user and "{} {0}" in user
     assert '"status": "done"' in system
+
+
+def test_a_restarted_daemon_adopts_a_run_that_is_still_going(tmp_path):
+    """A detached implementer outlives its daemon; the next daemon picks up its cycle and gates it."""
+    repo = make_project(tmp_path)
+    p = write_config(tmp_path, repo, implement={"enabled": True, "max_attempts": 2,
+                                                "backlog_command": "cat TODO.txt"})
+    import yaml
+    c = yaml.safe_load(p.read_text())
+    # an implementer that takes a few seconds, so the first daemon is gone before it finishes
+    c["providers"]["slow"] = {"kind": "script", "command": ["sh", "-c", f"sleep 6; exec {sys.executable} {ROOT / 'tests/fake_agent.py'}"]}
+    c["roles"]["implementer"]["provider"] = "slow"
+    p.write_text(yaml.safe_dump(c))
+    from ff.cli import main as ff
+    assert ff(["--config", str(p), "freeze", "--yes"]) == 0
+    f1 = Factory.from_path(p)
+    from ff.loops import ImplementLoop
+    loop1 = ImplementLoop(f1)
+    item = loop1.take()
+    t = threading.Thread(target=loop1.run_item, args=(item,), daemon=True)
+    t.start()
+    for _ in range(50):          # wait until the detached agent is running
+        rows = f1.store.q("SELECT * FROM runs WHERE status = 'running'")
+        if rows:
+            break
+        time.sleep(0.2)
+    assert rows, "the agent never started"
+    # "restart": a new daemon on the same state, while the agent still runs
+    f2 = Factory.from_path(p)
+    loop2 = ImplementLoop(f2)
+    adopted, stopped = f2.reconcile({"implement": loop2})
+    assert adopted == [rows[0]["id"]] and not stopped
+    for _ in range(200):
+        if f2.store.q("SELECT status FROM backlog WHERE item = ?", (item,))[0]["status"] == "done":
+            break
+        time.sleep(0.3)
+    assert f2.store.q("SELECT status FROM backlog WHERE item = ?", (item,))[0]["status"] == "done"
+    assert any(e["kind"] == "adopted" for e in f2.store.events())
+    assert "Nat.add(a,b)" in git(repo, "show", "main:src/add.bend")

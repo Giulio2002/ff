@@ -140,20 +140,38 @@ class Runner:
 
     def run(self, role_name: str, task: str, *, loop: str, worktree: Path, branch: str,
             parent: str | None = None, depth: int = 0, attempt: int = 1, result_extra: str = "",
-            extra: dict | None = None, use_slot: bool = True, run_id: str | None = None) -> RunResult:
+            extra: dict | None = None, use_slot: bool = True, run_id: str | None = None,
+            detached: bool = False, cycle: dict | None = None) -> RunResult:
+        """Run an agent and return its result. detached=True runs it in a process of its own (the
+        loops do), so it outlives a daemon restart and the next daemon can adopt it."""
         role = self.cfg.role(role_name)
         run_id = run_id or new_run_id(role_name)
         if not self.store.run(run_id):
             self.store.run_start(run_id, parent=parent, loop=loop, role=role_name, provider=role.provider,
                                  model=self.cfg.model_for(role), task=task, branch=branch,
-                                 worktree=str(worktree), attempt=attempt, status="queued")
+                                 worktree=str(worktree), attempt=attempt, status="queued",
+                                 extra={"result_extra": result_extra, "extra": extra or {}}, cycle=cycle or {})
         if use_slot:
             self.slots.acquire()
         try:
+            if detached:
+                self._spawn_runner(run_id, depth)
+                return self.wait(run_id)
             return self._run(run_id, role, task, loop, worktree, branch, depth, result_extra, extra)
         finally:
             if use_slot:
                 self.slots.release()
+
+    def _spawn_runner(self, run_id: str, depth: int) -> int:
+        d = self.runs_dir / run_id
+        d.mkdir(parents=True, exist_ok=True)
+        env = dict(os.environ, FF_DEPTH=str(depth))
+        env["PYTHONPATH"] = str(Path(__file__).resolve().parent.parent) + os.pathsep + env.get("PYTHONPATH", "")
+        p = subprocess.Popen([sys.executable, "-m", "ff", "--config", str(self.cfg.path), "_run-agent", run_id],
+                             stdout=open(d / "launcher.log", "a"), stderr=subprocess.STDOUT,
+                             stdin=subprocess.DEVNULL, start_new_session=True, env=env)
+        self.store.run_update(run_id, pid=p.pid)
+        return p.pid
 
     def launch_detached(self, role_name: str, task: str, *, loop: str, worktree: Path, branch: str,
                         parent: str | None, depth: int) -> str:
@@ -163,24 +181,20 @@ class Runner:
         self.store.run_start(run_id, parent=parent, loop=loop, role=role_name, provider=role.provider,
                              model=self.cfg.model_for(role), task=task, branch=branch, worktree=str(worktree),
                              attempt=1, status="queued")
-        d = self.runs_dir / run_id
-        d.mkdir(parents=True, exist_ok=True)
-        env = dict(os.environ, FF_DEPTH=str(depth))
-        env["PYTHONPATH"] = str(Path(__file__).resolve().parent.parent) + os.pathsep + env.get("PYTHONPATH", "")
-        p = subprocess.Popen([sys.executable, "-m", "ff", "--config", str(self.cfg.path), "_run-agent", run_id],
-                             stdout=open(d / "launcher.log", "w"), stderr=subprocess.STDOUT,
-                             stdin=subprocess.DEVNULL, start_new_session=True, env=env)
-        self.store.run_update(run_id, pid=p.pid)
+        self._spawn_runner(run_id, depth)
         return run_id
 
     def execute_queued(self, run_id: str) -> RunResult:
         r = self.store.run(run_id)
+        ex = json.loads(r["extra"] or "{}")
         return self.run(r["role"], r["task"], loop=r["loop"], worktree=Path(r["worktree"]), branch=r["branch"],
                         parent=r["parent"], depth=int(os.environ.get("FF_DEPTH", "1")), use_slot=False,
-                        run_id=run_id)
+                        run_id=run_id, attempt=r["attempt"] or 1, result_extra=ex.get("result_extra", ""),
+                        extra=ex.get("extra") or None)
 
     def wait(self, run_id: str, timeout: float | None = None, poll: float = 2.0) -> RunResult:
         t0 = time.time()
+        gone_since = None
         while True:
             r = self.store.run(run_id)
             if r is None:
@@ -188,6 +202,23 @@ class Runner:
             if r["status"] in FINAL:
                 return RunResult(run_id, r["status"], r["summary"] or "", json.loads(r["result"] or "{}"),
                                  json.loads(r["usage"] or "{}"), r["transcript"] or "")
+            # a process that died without recording its end must not be waited for forever
+            alive = True
+            if r["pid"]:
+                try:
+                    os.kill(r["pid"], 0)
+                except ProcessLookupError:
+                    alive = False
+                except PermissionError:
+                    pass
+            if alive:
+                gone_since = None
+            elif gone_since is None:
+                gone_since = time.time()
+            elif time.time() - gone_since > 60:
+                self.store.run_update(run_id, status="failed", ended=time.time(),
+                                      summary=(r["summary"] or "") + " [its process died without a result]")
+                continue
             if timeout is not None and time.time() - t0 > timeout:
                 return RunResult(run_id, "running")
             time.sleep(poll)
@@ -228,7 +259,8 @@ class Runner:
                    FF_WORKTREE=str(worktree), FF_BRANCH=branch, FF_RESULT_FILE=str(result_file),
                    FF_STATE=str(self.cfg.project.state_dir))
         env["PATH"] = str(ff_bin(self.cfg.project.state_dir)) + os.pathsep + env.get("PATH", "")
-        self.store.run_update(run_id, status="running", started=time.time(), transcript=str(transcript))
+        self.store.run_update(run_id, status="running", started=time.time(), transcript=str(transcript),
+                              pid=os.getpid())
         self.store.event(loop, "agent-start", f"{role.name} started ({prov.name}/{model}): {task.splitlines()[0][:160]}",
                          run_id)
         deadline = time.time() + role.timeout_minutes * 60

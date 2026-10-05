@@ -70,32 +70,49 @@ class Factory:
                 git(view, "clean", "-qfdx", "-e", "build/", check=False)   # keep build caches
             yield view
 
-    def reconcile(self) -> list[str]:
-        """At daemon start: runs a previous daemon's loops left behind. Their agent CLIs may still be
-        running with nobody to gate their work; stop them (process group) and reopen their backlog
-        items. Detached runs (subagents, ad-hoc agents) have their own process and are left alone."""
+    def reconcile(self, loops: dict | None = None) -> tuple[list[str], list[str]]:
+        """At daemon start, the loop runs a previous daemon left behind: a run whose process is still
+        going and whose loop is running here is adopted (its cycle continues: commit, gate, retry);
+        any other is stopped and its backlog item reopened. Detached ad-hoc runs and subagents have
+        their own process and are left alone. Returns (adopted, stopped)."""
         import os
         import signal
-        out = []
+        adopted, stopped = [], []
         for r in self.store.q("SELECT * FROM runs WHERE status IN ('running', 'queued') AND loop IN "
-                              "('implement', 'optimize', 'audit')"):
-            pid = r["pid"]
-            if pid:
+                              "('implement', 'optimize', 'audit') ORDER BY started"):
+            alive = False
+            if r["pid"]:
                 try:
-                    os.killpg(os.getpgid(pid), signal.SIGTERM)
+                    os.kill(r["pid"], 0)
+                    alive = True
+                except (ProcessLookupError, PermissionError):
+                    alive = False
+            loop = (loops or {}).get(r["loop"])
+            cyc = json.loads(r["cycle"] or "{}") if r["cycle"] else {}
+            if alive and loop is not None and cyc:
+                loop.adopt_in_thread(r)
+                adopted.append(r["id"])
+                continue
+            if alive:
+                try:
+                    os.killpg(os.getpgid(r["pid"]), signal.SIGTERM)
                 except (ProcessLookupError, PermissionError, OSError):
                     pass
             self.store.run_update(r["id"], status="stopped", ended=time.time(),
                                   summary=(r["summary"] or "") + " [stopped: its daemon was restarted]")
-            out.append(r["id"])
-        self.store.x("UPDATE backlog SET status = 'open' WHERE status = 'running'")
-        if out:
-            self.store.event("factory", "reconciled", f"stopped {len(out)} run(s) left by a previous daemon: {', '.join(out)}")
-        return out
+            stopped.append(r["id"])
+        adopted_items = {json.loads(r["cycle"] or "{}").get("item") for r in self.store.q(
+            "SELECT cycle FROM runs WHERE id IN (%s)" % ",".join("?" * len(adopted)), adopted)} if adopted else set()
+        for row in self.store.q("SELECT item FROM backlog WHERE status = 'running'"):
+            if row["item"] not in adopted_items:
+                self.store.x("UPDATE backlog SET status = 'open' WHERE item = ?", (row["item"],))
+        if adopted or stopped:
+            self.store.event("factory", "reconciled", f"previous daemon's runs: adopted {len(adopted)} "
+                             f"({', '.join(adopted)}), stopped {len(stopped)} ({', '.join(stopped)})")
+        return adopted, stopped
 
     def start_loops(self, names: list[str] | None = None) -> None:
         from .loops import LOOPS
-        self.reconcile()
         enabled = {"implement": self.cfg.implement, "optimize": self.cfg.optimize, "audit": self.cfg.audit}
         for name, cls in LOOPS.items():
             if names and name not in names:
@@ -103,9 +120,14 @@ class Factory:
             if not enabled[name].enabled:
                 continue
             loop = cls(self)
-            workers = {"implement": self.cfg.implement.workers, "optimize": self.cfg.optimize.workers, "audit": 1}[name]
-            loop.start(workers)
             self.loops[name] = loop
+        # adopt what a previous daemon left running before the workers take new items
+        self.reconcile(self.loops)
+        for name, loop in self.loops.items():
+            workers = {"implement": self.cfg.implement.workers, "optimize": self.cfg.optimize.workers, "audit": 1}[name]
+            # an adopted cycle occupies a worker's place
+            busy = sum(1 for t in loop.threads if t.name.startswith(f"{name}-adopt-"))
+            loop.start(max(0, workers - busy) if name != "audit" else workers)
             self.store.event("factory", "loop-start", f"loop {name} started with {workers} worker(s)")
 
     def stop_loops(self) -> None:

@@ -67,20 +67,38 @@ class Loop:
     # ---------------------------------------------------------------- the shared cycle
 
     def cycle(self, role: str, task: str, *, max_attempts: int, result_extra: str = "",
-              extra: dict | None = None, accept=None) -> CycleOutcome:
+              extra: dict | None = None, accept=None, item: str | None = None, resume: dict | None = None,
+              state: dict | None = None) -> CycleOutcome:
         """worktree -> agent -> commit -> rebase -> gate, retrying with the gate's log on red.
-        `accept(result, worktree)` may veto before the gate (the optimizer's benchmark)."""
+        `accept(result, worktree)` may veto before the gate (the optimizer's benchmark).
+
+        Agents run in processes of their own and the cycle's state is saved on each run (`cycle`),
+        so a restarted daemon can adopt a run that is still going: `resume` is that run's row."""
         f = self.f
-        first = new_run_id(role)
-        worktree, branch = f.ws.create(first)
-        runs, brief = [], task
+        if resume:
+            first = resume["id"]
+            worktree, branch = Path(resume["worktree"]), resume["branch"]
+            start = int(resume["attempt"] or 1)
+            brief = resume["task"]
+        else:
+            first = new_run_id(role)
+            worktree, branch = f.ws.create(first)
+            start, brief = 1, task
+        runs = []
+        detached = self.cfg.limits.detached_agents
         try:
-            for attempt in range(1, max_attempts + 1):
-                if not self.wait_unpaused():
-                    return CycleOutcome(False, "gave-up", runs, "stopped")
-                rid = first if attempt == 1 else new_run_id(role)
-                r: RunResult = f.runner.run(role, brief, loop=self.name, worktree=worktree, branch=branch,
-                                            attempt=attempt, result_extra=result_extra, extra=extra, run_id=rid)
+            for attempt in range(start, max_attempts + 1):
+                if resume and attempt == start:
+                    r: RunResult = f.runner.wait(first)
+                else:
+                    if not self.wait_unpaused():
+                        return CycleOutcome(False, "gave-up", runs, "stopped")
+                    rid = first if (attempt == start and not resume) else new_run_id(role)
+                    cyc = {"loop": self.name, "role": role, "task": task, "max_attempts": max_attempts,
+                           "item": item, "result_extra": result_extra, **(state or {})}
+                    r = f.runner.run(role, brief, loop=self.name, worktree=worktree, branch=branch,
+                                     attempt=attempt, result_extra=result_extra, extra=extra, run_id=rid,
+                                     detached=detached, cycle=cyc)
                 runs.append(r.run_id)
                 if r.result.get("launch_error"):
                     # the agent never started (a CLI refusing to run, a bad binary, no login): not the
@@ -124,6 +142,24 @@ class Loop:
             return CycleOutcome(False, "gave-up", runs, f"no green gate after {max_attempts} attempts")
         finally:
             f.ws.remove(worktree)
+
+    def adopt(self, row) -> None:
+        """Continue the cycle of a run a previous daemon started and that is still going."""
+        raise NotImplementedError
+
+    def adopt_in_thread(self, row) -> None:
+        """Adopt `row` in a thread that then carries on as one of the loop's workers (the audit loop
+        has a single orchestrating worker, so an adopted fixer just ends)."""
+        def go():
+            try:
+                self.adopt(row)
+            except Exception as e:
+                self.log("error", f"adopting {row['id']} failed: {e!r}", row["id"])
+            if self.name != "audit":
+                self._guard(len(self.threads))
+        t = threading.Thread(target=go, name=f"{self.name}-adopt-{row['id']}", daemon=True)
+        t.start()
+        self.threads.append(t)
 
     def fresh_tree(self, role: str):
         rid = new_run_id(role)
@@ -198,10 +234,17 @@ class ImplementLoop(Loop):
         if item is None:
             self.stop.wait(120)
             return
-        note = self.store.q("SELECT note FROM backlog WHERE item = ?", (item,))[0]["note"]
+        self.run_item(item)
+
+    def run_item(self, item: str, resume=None) -> None:
+        note = self.store.q("SELECT note FROM backlog WHERE item = ?", (item,))
+        note = note[0]["note"] if note else None
         task = note if item.startswith("brief: ") and note else f"Close this open item of the contract:\n\n{note or item}"
+        if resume is not None:
+            task = json.loads(resume["cycle"] or "{}").get("task") or task
         try:
-            out = self.cycle(self.cfg.implement.role, task, max_attempts=self.cfg.implement.max_attempts)
+            out = self.cycle(self.cfg.implement.role, task, max_attempts=self.cfg.implement.max_attempts,
+                             item=item, resume=resume)
         except Exception:
             # a crash must not leave the item claimed by nobody
             self.store.x("UPDATE backlog SET status = 'open', updated = ? WHERE item = ?", (time.time(), item))
@@ -209,9 +252,17 @@ class ImplementLoop(Loop):
         status = {"merged": "done", "no-change": "open", "launch-error": "open"}.get(out.status, "blocked")
         self.store.x("UPDATE backlog SET status = ?, attempts = attempts + 1, run_id = ?, updated = ?, note = ? "
                      "WHERE item = ?", (status, out.run_ids[-1] if out.run_ids else None, time.time(),
-                                        out.summary[:2000], item))
+                                        out.summary[:2000] if status != "open" else note, item))
         self.log("item-" + status, f"{item[:120]}: {out.status} - {out.summary[:300]}",
                  out.run_ids[-1] if out.run_ids else None)
+
+    def adopt(self, row) -> None:
+        item = json.loads(row["cycle"] or "{}").get("item")
+        if not item:
+            raise ValueError("no backlog item recorded on the run")
+        self.store.x("UPDATE backlog SET status = 'running', updated = ? WHERE item = ?", (time.time(), item))
+        self.log("adopted", f"continuing {row['id']} on {item[:100]} after a daemon restart", row["id"])
+        self.run_item(item, resume=row)
 
 
 # ===================================================================== optimize
@@ -262,6 +313,9 @@ class OptimizeLoop(Loop):
         task = (f"Current benchmark on main: {base} ({self.cfg.benchmark.direction} is better; a change must improve it "
                 f"by at least {self.cfg.benchmark.min_improvement_pct}%).\n\nHistory, newest first:\n" + "\n".join(lines)
                 + ("\n\nGuidance from the coordinator:\n" + "\n".join(briefs) if briefs else ""))
+        self.experiment(base, task)
+
+    def experiment(self, base: float, task: str, resume=None) -> None:
         seen: dict = {}
 
         def accept(r: RunResult, wt: Path):
@@ -276,7 +330,7 @@ class OptimizeLoop(Loop):
             return True, ""
 
         out = self.cycle(self.cfg.optimize.role, task, max_attempts=2, result_extra=', "idea": "<one line>"',
-                         accept=accept)
+                         accept=accept, resume=resume, state={"baseline": base})
         idea = (out.result or {}).get("idea") or out.summary[:200]
         reason = out.summary if not out.ok else f"{seen.get('gain', 0):+.2f}%"
         self.store.x("INSERT INTO experiments (run_id, idea, baseline, candidate, kept, reason, ts) VALUES (?,?,?,?,?,?,?)",
@@ -284,6 +338,13 @@ class OptimizeLoop(Loop):
                       reason[:500], time.time()))
         self.log("experiment-kept" if out.ok else "experiment-reverted", f"{idea[:150]}: {reason[:200]}",
                  out.run_ids[-1] if out.run_ids else None)
+
+    def adopt(self, row) -> None:
+        cyc = json.loads(row["cycle"] or "{}")
+        if cyc.get("baseline") is None:
+            raise ValueError("no baseline recorded on the run")
+        self.log("adopted", f"continuing experiment {row['id']} after a daemon restart", row["id"])
+        self.experiment(float(cyc["baseline"]), cyc.get("task") or row["task"], resume=row)
 
 
 # ===================================================================== audit
@@ -397,15 +458,25 @@ class AuditLoop(Loop):
                          ("fix" if v.get("reachable") else "documented", json.dumps(v),
                           sev if sev in SEVERITIES else row["severity"], row["id"]))
 
-    def fix(self, row) -> None:
+    def fix(self, row, resume=None) -> None:
         task = (f"Finding {row['id']} (audit round {row['round']}, {row['flavor']}, {row['severity']}): {row['title']}\n\n"
                 f"{row['description']}\n\nReproducer:\n```\n{row['reproducer'][:8000]}\n```\n\n"
                 f"Judge's verdict: {row['verdict']}")
-        out = self.cycle(self.cfg.audit.fixer, task, max_attempts=3)
+        out = self.cycle(self.cfg.audit.fixer, task, max_attempts=3, resume=resume, state={"finding": row["id"]})
         self.store.x("UPDATE findings SET status = ?, fix_run = ? WHERE id = ?",
                      ("fixed" if out.ok else "open", out.run_ids[-1] if out.run_ids else None, row["id"]))
         self.log("fixed" if out.ok else "fix-failed", f"finding {row['id']} {row['title'][:120]}: {out.status}",
                  out.run_ids[-1] if out.run_ids else None)
+
+    def adopt(self, run) -> None:
+        """Only fixers are adopted (their cycle carries the finding); a round's auditors and judge
+        run inside the round and are stopped by the restart."""
+        fid = json.loads(run["cycle"] or "{}").get("finding")
+        if fid is None:
+            raise ValueError("not a fixer run")
+        row = self.store.q("SELECT * FROM findings WHERE id = ?", (fid,))[0]
+        self.log("adopted", f"continuing fixer {run['id']} on finding {fid} after a daemon restart", run["id"])
+        self.fix(row, resume=run)
 
     def restamp(self, n: int, base: str) -> dict:
         rows = self.store.q("SELECT * FROM findings WHERE round = ?", (n,))
