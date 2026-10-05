@@ -305,3 +305,18 @@ def test_a_clean_exit_without_a_result_file_is_done(tmp_path):
     wt, br = f.ws.create("talk")
     r = f.runner.run("worker", "do it", loop="t", worktree=wt, branch=br)
     assert r.status == "done" and "All layers proved" in r.summary, r
+
+
+def test_backlog_ids_survive_a_reworded_description(tmp_path):
+    repo = make_project(tmp_path, bug=False)
+    out = tmp_path / "backlog.txt"
+    out.write_text("law:gas\tprove gas (old wording)\n")
+    p = write_config(tmp_path, repo, implement={"enabled": True, "backlog_command": f"cat {out}"})
+    f = Factory.from_path(p)
+    from ff.loops import ImplementLoop
+    loop = ImplementLoop(f)
+    assert loop.take() == "law:gas"
+    out.write_text("law:gas\tprove gas (new wording)\nlaw:run\tprove run\n")
+    assert loop.take() == "law:run", "the reworded item is the same item, still running"
+    rows = {r["item"]: (r["status"], r["note"]) for r in f.store.q("SELECT * FROM backlog")}
+    assert rows["law:gas"] == ("running", "prove gas (new wording)")

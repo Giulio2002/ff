@@ -145,19 +145,31 @@ class ImplementLoop(Loop):
         if code != 0:
             self.log("error", f"backlog command failed: {out[-500:]}")
             return
+        # Each item is "<id>\t<description>" (or an object {"id", "task"} in a JSON list); a plain
+        # line is its own id. The id is the item's identity: a description may change (a reworded
+        # statement) without creating a second item while the first is still being worked on.
         out = out.strip()
+        pairs: list[tuple[str, str]] = []
         try:
-            items = json.loads(out)
-            items = [i if isinstance(i, str) else (i.get("id") or json.dumps(i)) for i in items]
+            for i in json.loads(out):
+                if isinstance(i, str):
+                    pairs.append((i, i))
+                else:
+                    iid = str(i.get("id") or json.dumps(i, sort_keys=True))
+                    pairs.append((iid, str(i.get("task") or i.get("description") or iid)))
         except json.JSONDecodeError:
-            items = [l.strip() for l in out.splitlines() if l.strip()]
+            for l in out.splitlines():
+                if l.strip():
+                    iid, _, desc = l.partition("\t")
+                    pairs.append((iid.strip(), (desc or iid).strip()))
         now = time.time()
-        current = set(items)
-        for it in items:
-            self.store.x("INSERT OR IGNORE INTO backlog (item, status, attempts, updated) VALUES (?, 'open', 0, ?)",
-                         (it, now))
+        current = {iid for iid, _ in pairs}
+        for iid, desc in pairs:
+            self.store.x("INSERT OR IGNORE INTO backlog (item, status, attempts, updated, note) VALUES (?, 'open', 0, ?, ?)",
+                         (iid, now, desc))
+            self.store.x("UPDATE backlog SET note = ? WHERE item = ? AND NOT item LIKE 'brief: %'", (desc, iid))
         for r in self.store.q("SELECT item FROM backlog WHERE status IN ('open','blocked')"):
-            if r["item"] not in current:
+            if r["item"] not in current and not r["item"].startswith("brief: "):
                 self.store.x("UPDATE backlog SET status = 'done', updated = ? WHERE item = ?", (now, r["item"]))
 
     def take(self) -> str | None:
@@ -186,7 +198,7 @@ class ImplementLoop(Loop):
             self.stop.wait(120)
             return
         note = self.store.q("SELECT note FROM backlog WHERE item = ?", (item,))[0]["note"]
-        task = note if item.startswith("brief: ") and note else f"Close this open item of the contract:\n\n{item}"
+        task = note if item.startswith("brief: ") and note else f"Close this open item of the contract:\n\n{note or item}"
         out = self.cycle(self.cfg.implement.role, task, max_attempts=self.cfg.implement.max_attempts)
         status = {"merged": "done", "no-change": "open", "launch-error": "open"}.get(out.status, "blocked")
         self.store.x("UPDATE backlog SET status = ?, attempts = attempts + 1, run_id = ?, updated = ?, note = ? "
