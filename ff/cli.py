@@ -268,7 +268,8 @@ def cmd_status(a):
 def cmd_events(a):
     f = _factory(a)
     for e in f.store.events(time.time() - a.since, a.loop, a.limit):
-        print(f"{time.strftime('%m-%d %H:%M', time.localtime(e['ts']))} {e['loop']:<9} {e['kind']:<16} {e['message']}"
+        msg = " ".join((e["message"] or "").split())   # one event, one line
+        print(f"{time.strftime('%m-%d %H:%M', time.localtime(e['ts']))} {e['loop']:<9} {e['kind']:<16} {msg}"
               + (f"  [{e['run_id']}]" if e["run_id"] else ""))
 
 
