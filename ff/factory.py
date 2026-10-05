@@ -70,8 +70,32 @@ class Factory:
                 git(view, "clean", "-qfdx", "-e", "build/", check=False)   # keep build caches
             yield view
 
+    def reconcile(self) -> list[str]:
+        """At daemon start: runs a previous daemon's loops left behind. Their agent CLIs may still be
+        running with nobody to gate their work; stop them (process group) and reopen their backlog
+        items. Detached runs (subagents, ad-hoc agents) have their own process and are left alone."""
+        import os
+        import signal
+        out = []
+        for r in self.store.q("SELECT * FROM runs WHERE status IN ('running', 'queued') AND loop IN "
+                              "('implement', 'optimize', 'audit')"):
+            pid = r["pid"]
+            if pid:
+                try:
+                    os.killpg(os.getpgid(pid), signal.SIGTERM)
+                except (ProcessLookupError, PermissionError, OSError):
+                    pass
+            self.store.run_update(r["id"], status="stopped", ended=time.time(),
+                                  summary=(r["summary"] or "") + " [stopped: its daemon was restarted]")
+            out.append(r["id"])
+        self.store.x("UPDATE backlog SET status = 'open' WHERE status = 'running'")
+        if out:
+            self.store.event("factory", "reconciled", f"stopped {len(out)} run(s) left by a previous daemon: {', '.join(out)}")
+        return out
+
     def start_loops(self, names: list[str] | None = None) -> None:
         from .loops import LOOPS
+        self.reconcile()
         enabled = {"implement": self.cfg.implement, "optimize": self.cfg.optimize, "audit": self.cfg.audit}
         for name, cls in LOOPS.items():
             if names and name not in names:

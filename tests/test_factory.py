@@ -356,3 +356,15 @@ def test_references_reach_the_optimizer_prompt(tmp_path):
     cfg = load(p)
     system, user = prompts.build(cfg, cfg.role("optimizer"), "go", worktree="/w", branch="b", result_file="/r")
     assert "Montgomery with 64-bit words" in user and str(ref / "montgomery.go") in user
+
+
+def test_a_restarted_daemon_stops_the_runs_it_left_behind(tmp_path):
+    repo = make_project(tmp_path, bug=False)
+    f = Factory.from_path(write_config(tmp_path, repo))
+    p = subprocess.Popen(["sleep", "300"], start_new_session=True)
+    f.store.run_start("implementer-old", loop="implement", role="implementer", status="running", pid=p.pid)
+    f.store.x("INSERT INTO backlog (item, status, attempts, updated) VALUES ('law:x', 'running', 0, 0)")
+    assert f.reconcile() == ["implementer-old"]
+    assert p.wait(timeout=10) != 0
+    assert f.store.run("implementer-old")["status"] == "stopped"
+    assert f.store.q("SELECT status FROM backlog")[0]["status"] == "open"
