@@ -683,8 +683,14 @@ def cmd_chat(a):
                "factory: run `ff watch` with your Monitor tool so its events reach you, and tell me when "
                "something needs my attention.")
     if prov.kind == "claude":
+        # The coordinator's own tools are pre-approved: every `ff` command (status, steer, brief, ...),
+        # reading the factory's state and the target, and editing the factory's YAML. Anything else
+        # still asks the human.
+        allow = ["Bash(ff:*)", "Bash(ff *)", f"Read({cfg.project.state_dir}/**)", f"Read({cfg.project.repo}/**)",
+                 f"Read({cfg.path})", f"Edit({cfg.path})", "Grep", "Glob"]
         settings = {"statusLine": {"type": "command", "command": "ff statusline", "padding": 0},
-                    "hooks": {"UserPromptSubmit": [{"hooks": [{"type": "command", "command": "ff digest"}]}]}}
+                    "hooks": {"UserPromptSubmit": [{"hooks": [{"type": "command", "command": "ff digest"}]}]},
+                    "permissions": {"allow": allow}}
         argv = [prov.binary, "--append-system-prompt", text, "--settings", json.dumps(settings)]
         argv += (["--model", model] if model else []) + prov.args + role.args
         argv += ["-p", a.print_] if a.print_ else [opening]
@@ -695,7 +701,8 @@ def cmd_chat(a):
         print("the coordinator needs a claude or codex provider", file=sys.stderr)
         return 1
     cfg.project.state_dir.mkdir(parents=True, exist_ok=True)
-    return subprocess.call(argv, cwd=cfg.project.state_dir, env=env)
+    return subprocess.call(argv, cwd=cfg.project.state_dir, env=env,
+                           stdin=subprocess.DEVNULL if a.print_ else None)
 
 
 def _strip_dashes(args: list[str]) -> list[str]:
