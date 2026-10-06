@@ -148,10 +148,30 @@ def _last_json_object(text: str) -> dict:
     return {}
 
 
+class Slots:
+    """A counting limit. `acquire(force=True)` takes a place without waiting: an agent adopted from a
+    previous daemon is already running and counts against the limit, so new agents wait for it."""
+
+    def __init__(self, limit: int):
+        self.limit, self.used = max(1, limit), 0
+        self.cv = threading.Condition()
+
+    def acquire(self, force: bool = False) -> None:
+        with self.cv:
+            while not force and self.used >= self.limit:
+                self.cv.wait()
+            self.used += 1
+
+    def release(self) -> None:
+        with self.cv:
+            self.used -= 1
+            self.cv.notify_all()
+
+
 class Runner:
     def __init__(self, cfg: Config, store: Store):
         self.cfg, self.store = cfg, store
-        self.slots = threading.BoundedSemaphore(max(1, cfg.limits.max_parallel_agents))
+        self.slots = Slots(cfg.limits.max_parallel_agents)
         self.pool = Pool()
         self.runs_dir = cfg.project.state_dir / "runs"
         self.runs_dir.mkdir(parents=True, exist_ok=True)

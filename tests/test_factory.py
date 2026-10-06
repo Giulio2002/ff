@@ -588,3 +588,20 @@ def test_a_restart_resumes_the_audit_round_and_remembers_the_answer(tmp_path):
     assert loop2.worker(0) is False
     assert len(f.store.q("SELECT * FROM decisions")) == 1
     assert not f.store.q("SELECT 1 FROM rounds WHERE n = 2")
+
+
+def test_slots_count_adopted_agents():
+    from ff.agents import Slots
+    s = Slots(2)
+    s.acquire(force=True)
+    s.acquire(force=True)
+    s.acquire(force=True)          # three adopted agents over a limit of two
+    got = []
+    t = threading.Thread(target=lambda: (s.acquire(), got.append(1)), daemon=True)
+    t.start()
+    time.sleep(0.3)
+    assert not got, "a new agent waits while adopted ones fill the limit"
+    s.release()
+    s.release()
+    t.join(5)
+    assert got

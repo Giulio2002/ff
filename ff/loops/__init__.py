@@ -89,7 +89,11 @@ class Loop:
         try:
             for attempt in range(start, max_attempts + 1):
                 if resume and attempt == start:
-                    r: RunResult = f.runner.wait(first)
+                    f.runner.slots.acquire(force=True)    # it is running already: it counts
+                    try:
+                        r: RunResult = f.runner.wait(first)
+                    finally:
+                        f.runner.slots.release()
                 else:
                     if not self.wait_unpaused():
                         return CycleOutcome(False, "gave-up", runs, "stopped")
@@ -400,6 +404,11 @@ FINDINGS_EXTRA = (', "findings": [{"title": "...", "severity": "critical|high|me
 class AuditLoop(Loop):
     name = "audit"
 
+    def __init__(self, f: "Factory"):
+        super().__init__(f)
+        from ..agents import Slots
+        self._fixers = Slots(self.cfg.audit.fixers)
+
     def waiting_for(self) -> str:
         """What `loops.audit.after` still waits for ("" when the audit may run)."""
         out = []
@@ -573,6 +582,14 @@ class AuditLoop(Loop):
                 self.store.x("UPDATE findings SET status = 'fix' WHERE id = ?", (row["id"],))
 
     def fix(self, row, resume=None) -> None:
+        # at most audit.fixers at once, counting fixers adopted from a previous daemon
+        self._fixers.acquire(force=resume is not None)
+        try:
+            self._fix(row, resume)
+        finally:
+            self._fixers.release()
+
+    def _fix(self, row, resume=None) -> None:
         now = self.store.q("SELECT status FROM findings WHERE id = ?", (row["id"],))
         if resume is None and now and now[0]["status"] != "fix":
             return      # closed meanwhile (a duplicate, or fixed by hand)
