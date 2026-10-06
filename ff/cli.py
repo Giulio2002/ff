@@ -234,7 +234,10 @@ def cmd_run(a):
     f.stop_loops()
     if srv:
         srv.shutdown()
-    print("factory stopped (running agents finish their current step; `ff stop` ends them)")
+    print("factory stopped (running agents finish their current step; `ff stop` ends them)", flush=True)
+    # do not wait for the loops' threads: they wait on agents that run in processes of their own and
+    # that the next daemon adopts (an audit round's fixer pool would otherwise hold the exit for hours)
+    os._exit(0)
 
 
 def cmd_serve(a):
@@ -631,7 +634,7 @@ def cmd_subagent(a):
 
 IMPORTANT = ("gate-green", "gate-red", "agent-end", "launch-error", "error", "item-done", "item-blocked", "note",
              "decision", "accounts-exhausted", "account-switch", "limit", "experiment-kept", "experiment-reverted",
-             "round-start", "round-end", "findings", "fixed", "fix-failed", "audit-done", "config-reloaded",
+             "round-start", "round-end", "round-resume", "findings", "fixed", "fix-failed", "fix-nochange", "audit-done", "config-reloaded",
              "target-reached", "target-lost", "waiting")
 
 

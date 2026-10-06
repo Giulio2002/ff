@@ -582,13 +582,17 @@ class AuditLoop(Loop):
         out = self.cycle(self.cfg.audit.fixer, task, max_attempts=3, resume=resume, state={"finding": row["id"]})
         if out.status == "superseded":
             return
+        # a fixer that changed nothing found the finding already fixed or no longer reproducible on
+        # main: its own status (it says why in its summary), neither fixed nor a failed fix
+        status = "fixed" if out.ok else ("no-change" if out.status == "no-change" else "open")
         self.store.x("UPDATE findings SET status = ?, fix_run = ? WHERE id = ?",
-                     ("fixed" if out.ok else "open", out.run_ids[-1] if out.run_ids else None, row["id"]))
+                     (status, out.run_ids[-1] if out.run_ids else None, row["id"]))
         if out.ok:
             self.store.x("UPDATE findings SET status = 'fixed', fix_run = ? WHERE status = 'duplicate' AND "
                          "json_extract(verdict, '$.duplicate_of') = ?",
                          (out.run_ids[-1] if out.run_ids else None, row["id"]))
-        self.log("fixed" if out.ok else "fix-failed", f"finding {row['id']} {row['title'][:120]}: {out.status}",
+        self.log({"fixed": "fixed", "no-change": "fix-nochange"}.get(status, "fix-failed"),
+                 f"finding {row['id']} {row['title'][:120]}: {out.status} - {out.summary[:300]}",
                  out.run_ids[-1] if out.run_ids else None)
 
     def adopt(self, run) -> None:
@@ -606,7 +610,7 @@ class AuditLoop(Loop):
         counts: dict = {"findings": len(rows)}
         for r in rows:
             counts[r["status"]] = counts.get(r["status"], 0) + 1
-            reachable = r["status"] in ("fix", "fixed", "open", "duplicate")
+            reachable = r["status"] in ("fix", "fixed", "open", "duplicate", "no-change")
             if reachable and r["severity"] == "critical":
                 counts["reachable_critical"] = counts.get("reachable_critical", 0) + 1
         rid, wt, br = self.fresh_tree("evidence")
