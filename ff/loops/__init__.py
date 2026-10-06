@@ -515,9 +515,8 @@ class AuditLoop(Loop):
         self.store.x("UPDATE rounds SET status = 'fixing' WHERE n = ?", (n,))
         with ThreadPoolExecutor(max_workers=max(1, a.fixers)) as ex:
             list(ex.map(self.fix, to_fix))
-        while not self.stop.is_set() and self.store.q(
-                "SELECT 1 FROM runs WHERE loop = 'audit' AND status IN ('running', 'queued') AND cycle IS NOT NULL LIMIT 1"):
-            self.stop.wait(15)      # adopted fixers of this round finish before it is stamped
+        while not self.stop.is_set() and self._fixers.busy():
+            self.stop.wait(15)      # adopted fix cycles (agent, rebase, gate) finish before the round is stamped
         if self.stop.is_set():
             return False
         # 4. document the unreachable ones and restamp the evidence, through the gate as well
@@ -618,9 +617,18 @@ class AuditLoop(Loop):
         fid = json.loads(run["cycle"] or "{}").get("finding")
         if fid is None:
             raise ValueError("not a fixer run")
-        row = self.store.q("SELECT * FROM findings WHERE id = ?", (fid,))[0]
-        self.log("adopted", f"continuing fixer {run['id']} on finding {fid} after a daemon restart", run["id"])
-        self.fix(row, resume=run)
+        try:
+            row = self.store.q("SELECT * FROM findings WHERE id = ?", (fid,))[0]
+            self.log("adopted", f"continuing fixer {run['id']} on finding {fid} after a daemon restart", run["id"])
+            self._fix(row, resume=run)
+        finally:
+            self._fixers.release()      # taken in adopt_in_thread
+
+    def adopt_in_thread(self, row) -> None:
+        # the adopted fix holds its place from now, so a resuming round waits for it
+        if json.loads(row["cycle"] or "{}").get("finding") is not None:
+            self._fixers.acquire(force=True)
+        super().adopt_in_thread(row)
 
     def restamp(self, n: int, base: str) -> dict:
         rows = self.store.q("SELECT * FROM findings WHERE round = ?", (n,))

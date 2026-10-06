@@ -605,3 +605,27 @@ def test_slots_count_adopted_agents():
     s.release()
     t.join(5)
     assert got
+
+
+@needs_bend
+def test_a_resumed_round_waits_for_its_adopted_fix_cycles(tmp_path):
+    repo = make_project(tmp_path, bug=False)
+    p = write_config(tmp_path, repo, audit={"enabled": True, "flavors": {"mutation": "auditor_mutation"},
+                                            "fixers": 2, "confirm_each_round": True, "max_rounds": 3})
+    f = Factory.from_path(p)
+    from ff.cli import main as ff
+    assert ff(["--config", str(p), "freeze", "--yes"]) == 0
+    main = git(repo, "rev-parse", "main")
+    f.store.x("INSERT INTO rounds (n, started, base_commit, status) VALUES (1, ?, ?, 'fixing')", (time.time(), main))
+    from ff.loops import AuditLoop
+    loop = AuditLoop(f)
+    loop.stop.wait = lambda t=None: time.sleep(0.1) or False
+    loop._fixers.acquire(force=True)      # an adopted fix cycle: its agent is done, its gate is not
+    t = threading.Thread(target=loop.worker, args=(0,), daemon=True)
+    t.start()
+    time.sleep(1.5)
+    assert f.store.q("SELECT status FROM rounds WHERE n = 1")[0]["status"] == "fixing", \
+        "the round is not stamped while a fix cycle is still in flight"
+    loop._fixers.release()
+    t.join(120)
+    assert f.store.q("SELECT status FROM rounds WHERE n = 1")[0]["status"] == "done"

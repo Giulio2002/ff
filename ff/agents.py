@@ -162,6 +162,10 @@ class Slots:
                 self.cv.wait()
             self.used += 1
 
+    def busy(self) -> int:
+        with self.cv:
+            return self.used
+
     def release(self) -> None:
         with self.cv:
             self.used -= 1
