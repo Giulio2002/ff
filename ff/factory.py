@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+import os
+import uuid
 import threading
 from contextlib import contextmanager
 import time
@@ -23,6 +25,7 @@ class Factory:
         self.ws = Workspaces(cfg.project.repo, cfg.project.state_dir / "worktrees", cfg.project.main_branch)
         self.gate = Gate(cfg, self.store)
         self.loops: dict = {}
+        self.instance = f"{os.getpid()}-{uuid.uuid4().hex[:8]}"   # who owns adopted cycles
         self._view_lock = threading.Lock()
         self._view_locks: dict = {}
         self.maybe_reload()   # remembers the file's mtime

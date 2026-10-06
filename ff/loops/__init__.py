@@ -23,7 +23,7 @@ if TYPE_CHECKING:
 @dataclass
 class CycleOutcome:
     ok: bool
-    status: str           # merged | blocked | gave-up | no-change | rejected
+    status: str           # merged | blocked | gave-up | no-change | rejected | superseded
     run_ids: list[str]
     summary: str = ""
     result: dict | None = None
@@ -100,6 +100,10 @@ class Loop:
                                      attempt=attempt, result_extra=result_extra, extra=extra, run_id=rid,
                                      detached=detached, cycle=cyc)
                 runs.append(r.run_id)
+                owner = self.store.flag(f"owner:{r.run_id}")
+                if owner and owner != f.instance:
+                    # a newer daemon adopted this run and carries the cycle on; leave it to that one
+                    return CycleOutcome(False, "superseded", runs, f"adopted by another daemon", r.result)
                 if r.result.get("launch_error"):
                     # the agent never started (a CLI refusing to run, a bad binary, no login): not the
                     # agent's failure, so it costs no attempt; stop this loop until a human looks
@@ -141,7 +145,8 @@ class Loop:
                                f"{v.reason}\n\n```\n{v.log[-6000:]}\n```\nFix it on the same branch and commit."
             return CycleOutcome(False, "gave-up", runs, f"no green gate after {max_attempts} attempts")
         finally:
-            f.ws.remove(worktree)
+            if not (runs and self.store.flag(f"owner:{runs[-1]}") not in (None, f.instance)):
+                f.ws.remove(worktree)   # (a superseded cycle leaves the worktree to its new owner)
 
     def adopt(self, row) -> None:
         """Continue the cycle of a run a previous daemon started and that is still going."""
@@ -150,11 +155,14 @@ class Loop:
     def adopt_in_thread(self, row) -> None:
         """Adopt `row` in a thread that then carries on as one of the loop's workers (the audit loop
         has a single orchestrating worker, so an adopted fixer just ends)."""
+        self.store.set_flag(f"owner:{row['id']}", self.f.instance)
+
         def go():
             try:
                 self.adopt(row)
             except Exception as e:
-                self.log("error", f"adopting {row['id']} failed: {e!r}", row["id"])
+                import traceback
+                self.log("error", f"adopting {row['id']} failed: {e!r}\n{traceback.format_exc()[-1500:]}", row["id"])
             if self.name != "audit":
                 self._guard(len(self.threads))
         t = threading.Thread(target=go, name=f"{self.name}-adopt-{row['id']}", daemon=True)
@@ -250,9 +258,20 @@ class ImplementLoop(Loop):
                              item=item, resume=resume)
         except Exception:
             # a crash must not leave the item claimed by nobody
-            self.store.x("UPDATE backlog SET status = 'open', updated = ? WHERE item = ?", (time.time(), item))
+            self.store.x("UPDATE backlog SET status = 'open', updated = ? WHERE item = ? AND status = 'running'",
+                         (time.time(), item))
             raise
+        if out.status == "superseded":
+            return
         status = {"merged": "done", "no-change": "open", "launch-error": "open"}.get(out.status, "blocked")
+        if out.status == "no-change":
+            # a brief is one-off guidance: an agent that found nothing to change has handled it.
+            # A contract item the agent keeps finding nothing to do for is blocked, not retried forever.
+            prev = self.store.q("SELECT attempts FROM backlog WHERE item = ?", (item,))
+            if item.startswith("brief: "):
+                status = "done"
+            elif prev and prev[0]["attempts"] + 1 >= self.cfg.implement.max_attempts:
+                status = "blocked"
         self.store.x("UPDATE backlog SET status = ?, attempts = attempts + 1, run_id = ?, updated = ?, note = ? "
                      "WHERE item = ?", (status, out.run_ids[-1] if out.run_ids else None, time.time(),
                                         out.summary[:2000] if status != "open" else note, item))
@@ -334,6 +353,8 @@ class OptimizeLoop(Loop):
 
         out = self.cycle(self.cfg.optimize.role, task, max_attempts=2, result_extra=', "idea": "<one line>"',
                          accept=accept, resume=resume, state={"baseline": base})
+        if out.status == "superseded":
+            return
         idea = (out.result or {}).get("idea") or out.summary[:200]
         reason = out.summary if not out.ok else f"{seen.get('gain', 0):+.2f}%"
         self.store.x("INSERT INTO experiments (run_id, idea, baseline, candidate, kept, reason, ts) VALUES (?,?,?,?,?,?,?)",
@@ -466,6 +487,8 @@ class AuditLoop(Loop):
                 f"{row['description']}\n\nReproducer:\n```\n{row['reproducer'][:8000]}\n```\n\n"
                 f"Judge's verdict: {row['verdict']}")
         out = self.cycle(self.cfg.audit.fixer, task, max_attempts=3, resume=resume, state={"finding": row["id"]})
+        if out.status == "superseded":
+            return
         self.store.x("UPDATE findings SET status = ?, fix_run = ? WHERE id = ?",
                      ("fixed" if out.ok else "open", out.run_ids[-1] if out.run_ids else None, row["id"]))
         self.log("fixed" if out.ok else "fix-failed", f"finding {row['id']} {row['title'][:120]}: {out.status}",

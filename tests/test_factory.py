@@ -416,6 +416,7 @@ def test_prompts_with_braces_do_not_crash(tmp_path):
     assert '"status": "done"' in system
 
 
+@needs_bend
 def test_a_restarted_daemon_adopts_a_run_that_is_still_going(tmp_path):
     """A detached implementer outlives its daemon; the next daemon picks up its cycle and gates it."""
     repo = make_project(tmp_path)
@@ -490,3 +491,25 @@ def test_a_session_stays_open_while_the_agent_has_background_work(tmp_path, monk
     wt, br = f.ws.create("bg")
     r = f.runner.run("worker", "BACKGROUND-WAKE", loop="adhoc", worktree=wt, branch=br)
     assert r.status == "done" and r.summary == "woke up and finished", r
+
+
+def test_a_brief_with_nothing_to_change_is_done_not_retried(tmp_path):
+    repo = make_project(tmp_path, bug=False)
+    p = write_config(tmp_path, repo, implement={"enabled": True, "max_attempts": 2,
+                                                "backlog_command": "printf 'item one\\n'"})
+    import yaml
+    c = yaml.safe_load(p.read_text())
+    c["providers"]["idle"] = {"kind": "script", "command": ["sh", "-c", "cat >/dev/null; echo 'Nothing to change.'"]}
+    c["roles"]["implementer"]["provider"] = "idle"
+    p.write_text(yaml.safe_dump(c))
+    f = Factory.from_path(p)
+    from ff.loops import ImplementLoop
+    loop = ImplementLoop(f)
+    f.store.x("INSERT INTO briefs (loop, text, status, ts) VALUES ('implement', 'FYI: a new test runs', 'open', 0)")
+    loop.worker(0)
+    rows = {r["item"]: r["status"] for r in f.store.q("SELECT * FROM backlog")}
+    assert rows["brief: FYI: a new test runs"] == "done", rows
+    loop.worker(0)
+    loop.worker(0)
+    rows = {r["item"]: r["status"] for r in f.store.q("SELECT * FROM backlog")}
+    assert rows["item one"] == "blocked", "an item that keeps yielding no change must stop being retried"
