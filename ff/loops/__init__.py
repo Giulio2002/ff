@@ -658,6 +658,10 @@ class AuditLoop(Loop):
             ev.write_text((ev.read_text() if ev.exists() else "# Audit evidence\n") + stamp)
             self.f.ws.commit_pending(wt, f"audit round {n}: evidence and known limitations")
             v = self.f.gate.submit(br, None, f"audit round {n} evidence")
+            for _ in range(5):      # main moved meanwhile (a fix merged): rebase and resubmit
+                if v.ok or v.stage not in ("stale", "race") or not self.f.ws.rebase_on_main(wt):
+                    break
+                v = self.f.gate.submit(br, None, f"audit round {n} evidence")
             counts["evidence_gate"] = "green" if v.ok else f"red: {v.reason}"
         finally:
             self.f.ws.remove(wt, delete_branch=br)

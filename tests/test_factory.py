@@ -629,3 +629,29 @@ def test_a_resumed_round_waits_for_its_adopted_fix_cycles(tmp_path):
     loop._fixers.release()
     t.join(120)
     assert f.store.q("SELECT status FROM rounds WHERE n = 1")[0]["status"] == "done"
+
+
+@needs_bend
+def test_the_evidence_commit_rebases_when_main_moved(tmp_path, monkeypatch):
+    repo = make_project(tmp_path, bug=False)
+    p = write_config(tmp_path, repo, audit={"enabled": True, "flavors": {"mutation": "auditor_mutation"}})
+    f = Factory.from_path(p)
+    from ff.cli import main as ff
+    assert ff(["--config", str(p), "freeze", "--yes"]) == 0
+    from ff.loops import AuditLoop
+    loop = AuditLoop(f)
+    real = f.gate.submit
+    moved = []
+
+    def submit(branch, *a, **k):      # a fix lands on main just before the evidence is gated
+        if not moved:
+            moved.append(1)
+            wt, br = f.ws.create("other-fix")
+            (wt / "NOTE.txt").write_text("a fix\n")
+            f.ws.commit_pending(wt, "a fix")
+            assert real(br).ok
+        return real(branch, *a, **k)
+    monkeypatch.setattr(f.gate, "submit", submit)
+    counts = loop.restamp(1, git(repo, "rev-parse", "main"))
+    assert counts["evidence_gate"] == "green", counts
+    assert "EVIDENCE.md" in git(repo, "ls-tree", "-r", "--name-only", "main")
