@@ -98,6 +98,9 @@ class Loop:
                     if not self.wait_unpaused():
                         return CycleOutcome(False, "gave-up", runs, "stopped")
                     rid = first if (attempt == start and not resume) else new_run_id(role)
+                    for old in runs:        # the cycle lives on in its newest run only
+                        self.store.set_flag(f"cycle-open:{old}", None)
+                    self.store.set_flag(f"cycle-open:{rid}", "1")
                     cyc = {"loop": self.name, "role": role, "task": task, "max_attempts": max_attempts,
                            "item": item, "result_extra": result_extra, **(state or {})}
                     r = f.runner.run(role, brief, loop=self.name, worktree=worktree, branch=branch,
@@ -134,7 +137,7 @@ class Loop:
                     if not f.ws.rebase_on_main(worktree):
                         v = None
                         break
-                    v = f.gate.submit(branch, r.run_id, r.summary)
+                    v = f.gate.submit(branch, r.run_id, r.summary, rebase=lambda: f.ws.rebase_on_main(worktree))
                     if v.ok or v.stage not in ("stale", "race"):
                         break
                 if v is None:
@@ -151,6 +154,8 @@ class Loop:
         finally:
             if not (runs and self.store.flag(f"owner:{runs[-1]}") not in (None, f.instance)):
                 f.ws.remove(worktree)   # (a superseded cycle leaves the worktree to its new owner)
+                for old in runs + ([resume["id"]] if resume else []):
+                    self.store.set_flag(f"cycle-open:{old}", None)
 
     def adopt(self, row) -> None:
         """Continue the cycle of a run a previous daemon started and that is still going."""
@@ -657,11 +662,11 @@ class AuditLoop(Loop):
                 stamp += f"- [{r['status']}] {r['flavor']}/{r['severity']}: {r['title'][:160]}\n"
             ev.write_text((ev.read_text() if ev.exists() else "# Audit evidence\n") + stamp)
             self.f.ws.commit_pending(wt, f"audit round {n}: evidence and known limitations")
-            v = self.f.gate.submit(br, None, f"audit round {n} evidence")
+            v = self.f.gate.submit(br, None, f"audit round {n} evidence", rebase=lambda: self.f.ws.rebase_on_main(wt))
             for _ in range(5):      # main moved meanwhile (a fix merged): rebase and resubmit
                 if v.ok or v.stage not in ("stale", "race") or not self.f.ws.rebase_on_main(wt):
                     break
-                v = self.f.gate.submit(br, None, f"audit round {n} evidence")
+                v = self.f.gate.submit(br, None, f"audit round {n} evidence", rebase=lambda: self.f.ws.rebase_on_main(wt))
             counts["evidence_gate"] = "green" if v.ok else f"red: {v.reason}"
         finally:
             self.f.ws.remove(wt, delete_branch=br)

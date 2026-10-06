@@ -655,3 +655,56 @@ def test_the_evidence_commit_rebases_when_main_moved(tmp_path, monkeypatch):
     counts = loop.restamp(1, git(repo, "rev-parse", "main"))
     assert counts["evidence_gate"] == "green", counts
     assert "EVIDENCE.md" in git(repo, "ls-tree", "-r", "--name-only", "main")
+
+
+@needs_bend
+def test_the_gate_rebases_a_stale_candidate_under_its_lock(tmp_path):
+    repo = make_project(tmp_path, bug=False)
+    p = write_config(tmp_path, repo)
+    f = Factory.from_path(p)
+    from ff.cli import main as ff
+    assert ff(["--config", str(p), "freeze", "--yes"]) == 0
+    trees = []
+    for name in ("one", "two"):      # two fixes made on the same main
+        wt, br = f.ws.create(name)
+        (wt / f"{name}.txt").write_text(name)
+        f.ws.commit_pending(wt, name)
+        trees.append((wt, br))
+    assert f.gate.submit(trees[0][1]).ok
+    wt, br = trees[1]
+    assert f.gate.submit(br).stage == "stale"
+    v = f.gate.submit(br, rebase=lambda: f.ws.rebase_on_main(wt))
+    assert v.ok, (v.stage, v.reason)
+    files = git(repo, "ls-tree", "-r", "--name-only", "main")
+    assert "one.txt" in files and "two.txt" in files
+
+
+@needs_bend
+def test_a_restart_adopts_a_cycle_whose_agent_is_done_but_not_gated(tmp_path, monkeypatch):
+    repo = make_project(tmp_path)
+    p = write_config(tmp_path, repo, implement={"enabled": True, "max_attempts": 2,
+                                                "backlog_command": "cat TODO.txt"})
+    from ff.cli import main as ff
+    assert ff(["--config", str(p), "freeze", "--yes"]) == 0
+    f1 = Factory.from_path(p)
+    from ff.loops import ImplementLoop
+    loop1 = ImplementLoop(f1)
+    at_gate = threading.Event()
+    monkeypatch.setattr(f1.gate, "submit", lambda *a, **k: (at_gate.set(), threading.Event().wait())[1])
+    item = loop1.take()
+    threading.Thread(target=loop1.run_item, args=(item,), daemon=True).start()
+    assert at_gate.wait(120), "the agent never reached the gate"
+    run = f1.store.q("SELECT * FROM runs")[0]
+    assert run["status"] == "done"
+    # the daemon dies here (its thread never returns); the next one must finish the cycle
+    f2 = Factory.from_path(p)
+    loop2 = ImplementLoop(f2)
+    adopted, _ = f2.reconcile({"implement": loop2})
+    assert adopted == [run["id"]]
+    for _ in range(300):
+        if f2.store.q("SELECT status FROM backlog WHERE item = ?", (item,))[0]["status"] == "done":
+            break
+        time.sleep(0.3)
+    assert f2.store.q("SELECT status FROM backlog WHERE item = ?", (item,))[0]["status"] == "done"
+    assert "Nat.add(a,b)" in git(repo, "show", "main:src/add.bend")
+    assert not f2.store.q("SELECT 1 FROM flags WHERE key LIKE 'cycle-open:%' AND value = '1'")

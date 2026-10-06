@@ -81,8 +81,23 @@ class Factory:
         import os
         import signal
         adopted, stopped = [], []
-        for r in self.store.q("SELECT * FROM runs WHERE status IN ('running', 'queued') AND loop IN "
-                              "('implement', 'optimize', 'audit') ORDER BY started"):
+        # a cycle whose agent is done can still be on its way to main (commit, rebase, gate): its run
+        # is flagged cycle-open until the cycle ends, and is adopted like a running one
+        open_ids = {k["key"].split(":", 1)[1] for k in self.store.q("SELECT key FROM flags WHERE key LIKE 'cycle-open:%'")}
+        rows = self.store.q("SELECT * FROM runs WHERE (status IN ('running', 'queued') OR id IN (%s)) AND loop IN "
+                            "('implement', 'optimize', 'audit') ORDER BY started" % ",".join("?" * len(open_ids)),
+                            tuple(open_ids)) if open_ids else self.store.q(
+            "SELECT * FROM runs WHERE status IN ('running', 'queued') AND loop IN ('implement', 'optimize', 'audit') "
+            "ORDER BY started")
+        for r in rows:
+            if r["status"] in FINAL:
+                loop = (loops or {}).get(r["loop"])
+                if loop is not None and r["cycle"] and Path(r["worktree"] or "/nonexistent").exists():
+                    loop.adopt_in_thread(r)
+                    adopted.append(r["id"])
+                else:
+                    self.store.set_flag(f"cycle-open:{r['id']}", None)
+                continue
             alive = False
             if r["pid"]:
                 try:

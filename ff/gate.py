@@ -97,10 +97,14 @@ class Gate:
     def main_lock(self) -> dict[str, str]:
         return frozen.load_lock(show(self.repo, self.main, self.cfg.spec.lock_file))
 
-    def submit(self, branch: str, run_id: str | None = None, message: str = "") -> Verdict:
-        """Gate `branch`; on green main moves to the gated tree. Serialised across processes."""
+    def submit(self, branch: str, run_id: str | None = None, message: str = "", rebase=None) -> Verdict:
+        """Gate `branch`; on green main moves to the gated tree. Serialised across processes.
+        `rebase` (optional, returns True on a clean rebase onto main) is called under the gate's lock
+        when the candidate is stale, so candidates queued behind a merge do not all go stale at once."""
         with open(self.dir / "gate.lock", "w") as lk:
             fcntl.flock(lk, fcntl.LOCK_EX)
+            if rebase is not None and not is_ancestor(self.repo, sha(self.repo, self.main), sha(self.repo, branch)):
+                rebase()       # a conflict leaves the branch stale: _submit reports it
             return self._submit(branch, run_id, message)
 
     def _submit(self, branch: str, run_id: str | None, message: str) -> Verdict:
