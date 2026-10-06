@@ -66,9 +66,14 @@ elif role.startswith("auditor_"):
 elif role == "judge":
     ids = [int(x) for x in re.findall(r"## Finding (\d+)", task)]
     titles = re.findall(r"## Finding \d+ \([^)]*\): (.*)", task)
-    done(summary="judged", verdicts=[{"id": i, "reachable": "hand-built" not in t, "severity": "critical" if "hand-built" not in t else "low",
-                                      "reason": "via the API" if "hand-built" not in t else "not constructible"}
-                                     for i, t in zip(ids, titles)])
+    verdicts = [{"id": i, "reachable": "hand-built" not in t, "severity": "critical" if "hand-built" not in t else "low",
+                 "reason": "via the API" if "hand-built" not in t else "not constructible"}
+                for i, t in zip(ids, titles)]
+    # the same missing law reported by several auditors: one primary, the rest duplicates
+    same = [v for v, t in zip(verdicts, titles) if "missing law" in t]
+    for v in same[1:]:
+        v["duplicate_of"] = same[0]["id"]
+    done(summary="judged", verdicts=verdicts)
 elif role == "fixer":
     n = re.search(r"Finding (\d+)", task).group(1)
     if "# Rebase conflict" in task:     # resolve by redoing the change on top of the new main

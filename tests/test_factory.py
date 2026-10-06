@@ -166,6 +166,8 @@ def test_audit_round_judge_fix_and_evidence(tmp_path):
     loop.worker(0)
     rows = {r["title"]: r["status"] for r in f.store.q("SELECT * FROM findings")}
     assert rows["mutation: missing law add_comm_spec"] == "fixed"
+    assert rows["crash: missing law add_comm_spec"] == "fixed", "a duplicate is closed by its primary's fix"
+    assert len(f.store.q("SELECT * FROM runs WHERE role = 'fixer'")) == 1, "duplicates get no fixer of their own"
     assert rows["mutation: hand-built object"] == "documented"
     main_files = git(repo, "ls-tree", "-r", "--name-only", "main")
     assert "EVIDENCE.md" in main_files and "KNOWN_LIMITATIONS.md" in main_files

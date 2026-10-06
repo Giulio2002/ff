@@ -508,7 +508,8 @@ class AuditLoop(Loop):
         try:
             r = self.f.runner.run(self.cfg.audit.judge, f"Round {n} findings:\n\n{listing}", loop=self.name,
                                   worktree=wt, branch=br, run_id=rid,
-                                  result_extra=', "verdicts": [{"id": 0, "reachable": true, "severity": "...", "reason": "..."}]')
+                                  result_extra=', "verdicts": [{"id": 0, "reachable": true, "severity": "...", "reason": "...", '
+                                               '"duplicate_of": null}]')
         finally:
             self.f.ws.remove(wt, delete_branch=br)
         verdicts = {int(v.get("id", -1)): v for v in (r.result.get("verdicts") or []) if str(v.get("id", "")).isdigit()
@@ -518,11 +519,25 @@ class AuditLoop(Loop):
             if v is None:   # unjudged: be safe, treat as reachable
                 v = {"reachable": True, "reason": "the judge gave no verdict; treated as reachable"}
             sev = str(v.get("severity") or row["severity"]).lower()
+            dup = v.get("duplicate_of")
+            dup = int(dup) if str(dup).isdigit() and int(dup) != row["id"] and int(dup) in verdicts else None
+            status = "documented" if not v.get("reachable") else ("duplicate" if dup is not None else "fix")
+            if dup is not None:
+                v["duplicate_of"] = dup
             self.store.x("UPDATE findings SET status = ?, verdict = ?, severity = ? WHERE id = ?",
-                         ("fix" if v.get("reachable") else "documented", json.dumps(v),
-                          sev if sev in SEVERITIES else row["severity"], row["id"]))
+                         (status, json.dumps(v), sev if sev in SEVERITIES else row["severity"], row["id"]))
+        # a duplicate of a duplicate, or of a finding judged unreachable, is fixed on its own
+        for row in self.store.q(f"SELECT * FROM findings WHERE id IN ({','.join('?' * len(ids))}) "
+                                "AND status = 'duplicate'", ids):
+            prim = self.store.q("SELECT status FROM findings WHERE id = ?",
+                                (json.loads(row["verdict"])["duplicate_of"],))
+            if not prim or prim[0]["status"] != "fix":
+                self.store.x("UPDATE findings SET status = 'fix' WHERE id = ?", (row["id"],))
 
     def fix(self, row, resume=None) -> None:
+        now = self.store.q("SELECT status FROM findings WHERE id = ?", (row["id"],))
+        if resume is None and now and now[0]["status"] != "fix":
+            return      # closed meanwhile (a duplicate, or fixed by hand)
         task = (f"Finding {row['id']} (audit round {row['round']}, {row['flavor']}, {row['severity']}): {row['title']}\n\n"
                 f"{row['description']}\n\nReproducer:\n```\n{row['reproducer'][:8000]}\n```\n\n"
                 f"Judge's verdict: {row['verdict']}")
@@ -531,6 +546,10 @@ class AuditLoop(Loop):
             return
         self.store.x("UPDATE findings SET status = ?, fix_run = ? WHERE id = ?",
                      ("fixed" if out.ok else "open", out.run_ids[-1] if out.run_ids else None, row["id"]))
+        if out.ok:
+            self.store.x("UPDATE findings SET status = 'fixed', fix_run = ? WHERE status = 'duplicate' AND "
+                         "json_extract(verdict, '$.duplicate_of') = ?",
+                         (out.run_ids[-1] if out.run_ids else None, row["id"]))
         self.log("fixed" if out.ok else "fix-failed", f"finding {row['id']} {row['title'][:120]}: {out.status}",
                  out.run_ids[-1] if out.run_ids else None)
 
@@ -549,7 +568,7 @@ class AuditLoop(Loop):
         counts: dict = {"findings": len(rows)}
         for r in rows:
             counts[r["status"]] = counts.get(r["status"], 0) + 1
-            reachable = r["status"] in ("fix", "fixed", "open")
+            reachable = r["status"] in ("fix", "fixed", "open", "duplicate")
             if reachable and r["severity"] == "critical":
                 counts["reachable_critical"] = counts.get("reachable_critical", 0) + 1
         rid, wt, br = self.fresh_tree("evidence")
