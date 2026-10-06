@@ -549,3 +549,42 @@ def test_optimize_stops_at_its_target_and_audit_starts_after(tmp_path):
     from ff.config import ConfigError, load
     with pytest.raises(ConfigError):
         load(p)
+
+
+@needs_bend
+def test_a_restart_resumes_the_audit_round_and_remembers_the_answer(tmp_path):
+    repo = make_project(tmp_path, bug=False)
+    p = write_config(tmp_path, repo, audit={"enabled": True, "flavors": {"mutation": "auditor_mutation"},
+                                            "fixers": 1, "confirm_each_round": True, "max_rounds": 3})
+    f = Factory.from_path(p)
+    from ff.cli import main as ff
+    assert ff(["--config", str(p), "freeze", "--yes"]) == 0
+    # a previous daemon died in round 1's fixing stage with one finding still to fix
+    main = git(repo, "rev-parse", "main")
+    f.store.x("INSERT INTO rounds (n, started, base_commit, status) VALUES (1, ?, ?, 'fixing')", (time.time(), main))
+    f.store.x("INSERT INTO findings (round, flavor, run_id, title, severity, description, reproducer, status, "
+              "created, verdict) VALUES (1, 'mutation', 'x', 'mutation: missing law add_comm_spec', 'critical', "
+              "'d', 'r', 'fix', ?, '{}')", (time.time(),))
+    from ff.loops import AuditLoop
+    loop = AuditLoop(f)
+    loop.worker(0)
+    assert f.store.q("SELECT status FROM rounds WHERE n = 1")[0]["status"] == "done"
+    assert f.store.q("SELECT status FROM findings")[0]["status"] == "fixed"
+    assert not f.store.q("SELECT 1 FROM rounds WHERE n = 2"), "the round is resumed, not replaced"
+    assert not f.store.q("SELECT 1 FROM runs WHERE role LIKE 'auditor_%'"), "no new auditors for a resumed round"
+    # the next iteration asks about another round; the human says no
+    t = threading.Thread(target=loop.worker, args=(0,), daemon=True)
+    t.start()
+    for _ in range(100):
+        d = f.store.q("SELECT id FROM decisions WHERE answer IS NULL")
+        if d:
+            break
+        time.sleep(0.1)
+    f.store.x("UPDATE decisions SET answer = 'no', answered = ? WHERE id = ?", (time.time(), d[0]["id"]))
+    t.join(60)
+    assert not t.is_alive()
+    # a restarted daemon does not ask again and runs no further round
+    loop2 = AuditLoop(Factory.from_path(p))
+    assert loop2.worker(0) is False
+    assert len(f.store.q("SELECT * FROM decisions")) == 1
+    assert not f.store.q("SELECT 1 FROM rounds WHERE n = 2")

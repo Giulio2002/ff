@@ -416,89 +416,127 @@ class AuditLoop(Loop):
     def worker(self, i: int):
         a = self.cfg.audit
         last = self.store.q("SELECT * FROM rounds ORDER BY n DESC LIMIT 1")
-        n = (last[0]["n"] + 1) if last else 1
+        last = last[0] if last else None
+        if not self.wait_unpaused():
+            return False
+        if last is not None and last["status"] == "done" and a.confirm_each_round:
+            # the human's answer about another round outlives a daemon restart
+            ans = self.confirm(last["n"], json.loads(last["counts"] or "{}"))
+            if ans is None:
+                return False
+            if not ans:
+                self.log("audit-done", f"human said no more rounds after round {last['n']}")
+                return False
+        resume = last is not None and last["status"] != "done"
+        n = last["n"] if resume else (last["n"] + 1 if last else 1)
         if n > a.max_rounds:
             self.log("audit-done", f"reached max_rounds={a.max_rounds}; the audit loop stops")
             return False
-        if not self.wait_unpaused():
-            return False
-        waiting = self.waiting_for()
-        if waiting:
-            if self.store.flag("audit:waiting") != waiting:
-                self.store.set_flag("audit:waiting", waiting)
-                self.log("waiting", f"audit waits for: {waiting}")
-            self.stop.wait(120)
-            return
-        self.store.set_flag("audit:waiting", None)
+        if not resume:
+            waiting = self.waiting_for()
+            if waiting:
+                if self.store.flag("audit:waiting") != waiting:
+                    self.store.set_flag("audit:waiting", waiting)
+                    self.log("waiting", f"audit waits for: {waiting}")
+                self.stop.wait(120)
+                return
+            self.store.set_flag("audit:waiting", None)
         repo, main = self.cfg.project.repo, self.cfg.project.main_branch
-        base = sha(repo, main)
-        prev_base = last[0]["base_commit"] if last else None
-        self.store.x("INSERT INTO rounds (n, started, base_commit, status) VALUES (?,?,?, 'auditing')", (n, time.time(), base))
-        self.log("round-start", f"audit round {n} on {base[:10]} with fresh auditors: {', '.join(a.flavors)}")
+        prev = self.store.q("SELECT base_commit FROM rounds WHERE n < ? ORDER BY n DESC LIMIT 1", (n,))
+        prev_base = prev[0]["base_commit"] if prev else None
+        new_ids = []
+        if resume:
+            base = last["base_commit"]
+            new_ids = [r["id"] for r in self.store.q("SELECT id FROM findings WHERE round = ? AND status = 'new'", (n,))]
+            judged = self.store.q("SELECT 1 FROM findings WHERE round = ? AND status != 'new' LIMIT 1", (n,))
+            stage = "fix" if last["status"] == "fixing" else ("judge" if new_ids or judged else "audit")
+            self.log("round-resume", f"audit round {n} resumes at its {stage} stage after a daemon restart")
+        else:
+            base = sha(repo, main)
+            self.store.x("INSERT INTO rounds (n, started, base_commit, status) VALUES (?,?,?, 'auditing')",
+                         (n, time.time(), base))
+            self.log("round-start", f"audit round {n} on {base[:10]} with fresh auditors: {', '.join(a.flavors)}")
+            stage = "audit"
 
-        # 1. fresh auditors, in parallel; each in its own worktree of main
-        def audit(flavor_role):
-            flavor, role = flavor_role
-            rid, wt, br = self.fresh_tree(role)
-            try:
-                task = f"Audit round {n}, flavor: {flavor}. Main is at {base}."
-                if flavor == "regression":
-                    since = prev_base or git(repo, "rev-list", "--max-parents=0", main).splitlines()[0]
-                    changes = git(repo, "log", "--stat", "--format=%n%h %s", f"{since}..{main}", check=False)
-                    task += f"\n\nChanges on main since the last round ({since[:10]}..{base[:10]}):\n{changes[-20000:]}"
-                briefs = self.store.take_briefs(self.name)
-                if briefs:
-                    task += "\n\nGuidance from the coordinator:\n" + "\n".join(briefs)
-                r = self.f.runner.run(role, task, loop=self.name, worktree=wt, branch=br, run_id=rid,
-                                      result_extra=FINDINGS_EXTRA)
-                return flavor, r
-            finally:
-                self.f.ws.remove(wt, delete_branch=br)
+        if stage == "audit":
+            # 1. fresh auditors, in parallel; each in its own worktree of main
+            def audit(flavor_role):
+                flavor, role = flavor_role
+                rid, wt, br = self.fresh_tree(role)
+                try:
+                    task = f"Audit round {n}, flavor: {flavor}. Main is at {base}."
+                    if flavor == "regression":
+                        since = prev_base or git(repo, "rev-list", "--max-parents=0", main).splitlines()[0]
+                        changes = git(repo, "log", "--stat", "--format=%n%h %s", f"{since}..{main}", check=False)
+                        task += f"\n\nChanges on main since the last round ({since[:10]}..{base[:10]}):\n{changes[-20000:]}"
+                    briefs = self.store.take_briefs(self.name)
+                    if briefs:
+                        task += "\n\nGuidance from the coordinator:\n" + "\n".join(briefs)
+                    r = self.f.runner.run(role, task, loop=self.name, worktree=wt, branch=br, run_id=rid,
+                                          result_extra=FINDINGS_EXTRA)
+                    return flavor, r
+                finally:
+                    self.f.ws.remove(wt, delete_branch=br)
 
-        with ThreadPoolExecutor(max_workers=len(a.flavors) or 1) as ex:
-            results = list(ex.map(audit, a.flavors.items()))
-        ids = []
-        for flavor, r in results:
-            for fd in (r.result.get("findings") or []):
-                sev = str(fd.get("severity", "medium")).lower()
-                fid = self.store.x("INSERT INTO findings (round, flavor, run_id, title, severity, description, "
-                                   "reproducer, status, created) VALUES (?,?,?,?,?,?,?, 'new', ?)",
-                                   (n, flavor, r.run_id, str(fd.get("title", ""))[:300],
-                                    sev if sev in SEVERITIES else "medium", str(fd.get("description", "")),
-                                    str(fd.get("reproducer", "")), time.time()))
-                ids.append(fid)
-        self.log("findings", f"round {n}: {len(ids)} findings from {len(results)} auditors")
+            with ThreadPoolExecutor(max_workers=len(a.flavors) or 1) as ex:
+                results = list(ex.map(audit, a.flavors.items()))
+            ids = []
+            for flavor, r in results:
+                for fd in (r.result.get("findings") or []):
+                    sev = str(fd.get("severity", "medium")).lower()
+                    fid = self.store.x("INSERT INTO findings (round, flavor, run_id, title, severity, description, "
+                                       "reproducer, status, created) VALUES (?,?,?,?,?,?,?, 'new', ?)",
+                                       (n, flavor, r.run_id, str(fd.get("title", ""))[:300],
+                                        sev if sev in SEVERITIES else "medium", str(fd.get("description", "")),
+                                        str(fd.get("reproducer", "")), time.time()))
+                    ids.append(fid)
+            self.log("findings", f"round {n}: {len(ids)} findings from {len(results)} auditors")
+            new_ids = ids
 
         # 2. the judge: reachable through the public API?
-        if ids:
-            self.judge(n, ids)
-        # 3. fixers, in parallel, through the gate
-        to_fix = self.store.q("SELECT * FROM findings WHERE round = ? AND status = 'fix' ORDER BY "
-                              "CASE severity WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END", (n,))
+        if stage in ("audit", "judge") and new_ids:
+            self.judge(n, new_ids)
+        # 3. fixers, in parallel, through the gate (a fix an adopted fixer carries on is not started twice)
+        busy = {json.loads(r["cycle"] or "{}").get("finding") for r in self.store.q(
+            "SELECT cycle FROM runs WHERE loop = 'audit' AND status IN ('running', 'queued') AND cycle IS NOT NULL")}
+        to_fix = [r for r in self.store.q(
+            "SELECT * FROM findings WHERE round = ? AND status = 'fix' ORDER BY "
+            "CASE severity WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END", (n,))
+            if r["id"] not in busy]
         self.store.x("UPDATE rounds SET status = 'fixing' WHERE n = ?", (n,))
         with ThreadPoolExecutor(max_workers=max(1, a.fixers)) as ex:
             list(ex.map(self.fix, to_fix))
+        while not self.stop.is_set() and self.store.q(
+                "SELECT 1 FROM runs WHERE loop = 'audit' AND status IN ('running', 'queued') AND cycle IS NOT NULL LIMIT 1"):
+            self.stop.wait(15)      # adopted fixers of this round finish before it is stamped
+        if self.stop.is_set():
+            return False
         # 4. document the unreachable ones and restamp the evidence, through the gate as well
         counts = self.restamp(n, base)
         crit = counts.get("reachable_critical", 0)
         self.store.x("UPDATE rounds SET ended = ?, counts = ?, status = 'done' WHERE n = ?",
                      (time.time(), json.dumps(counts), n))
         self.log("round-end", f"audit round {n}: {json.dumps(counts)}")
-        # 5. one more round?
-        if a.confirm_each_round:
-            did = self.store.ask(f"Audit round {n} is merged ({crit} critical reachable findings, "
-                                 f"{counts.get('fixed', 0)} fixed). Run another round?", ["yes", "no"])
-            while not self.stop.is_set():
-                ans = self.store.answer(did)
-                if ans:
-                    if ans.strip().lower() not in ("yes", "y"):
-                        self.log("audit-done", f"human said no more rounds after round {n}")
-                        return False
-                    break
-                self.stop.wait(30)
-        elif crit <= a.stop_when_critical_at_most:
+        # 5. one more round? (asked at the start of the next iteration when confirm_each_round)
+        if not a.confirm_each_round and crit <= a.stop_when_critical_at_most:
             self.log("audit-done", f"round {n} found {crit} critical reachable findings: converged")
             return False
+
+    def confirm(self, n: int, counts: dict) -> bool | None:
+        """Ask once whether to run another round after round `n`, and wait for the answer.
+        True/False is the answer; None means the loop is stopping."""
+        key = f"audit:confirm:{n}"
+        did = self.store.flag(key)
+        if did is None:
+            did = self.store.ask(f"Audit round {n} is merged ({counts.get('reachable_critical', 0)} critical "
+                                 f"reachable findings, {counts.get('fixed', 0)} fixed). Run another round?", ["yes", "no"])
+            self.store.set_flag(key, str(did))
+        while not self.stop.is_set():
+            ans = self.store.answer(int(did))
+            if ans:
+                return ans.strip().lower() in ("yes", "y")
+            self.stop.wait(30)
+        return None
 
     def judge(self, n: int, ids: list[int]) -> None:
         rows = self.store.q(f"SELECT * FROM findings WHERE id IN ({','.join('?' * len(ids))})", ids)
