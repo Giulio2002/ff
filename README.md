@@ -33,6 +33,9 @@ writes the `generated` files, and the gate rejects any hand edit). Then the gate
 only if the number improves by `min_improvement_pct` *and* every proof, unit test and
 vector still passes; otherwise it's reverted. The history of experiments goes into the
 next optimizer's prompt.
+With `benchmark.target` set, the loop stops experimenting once main meets the target (it
+re-measures whenever main moves, and resumes if main falls short again), and an audit loop with
+`after: [implement, optimize]` starts by itself once the backlog is empty and the target is met.
 
 The optimizer learns from the **fastest baseline**: `benchmark.references` names the reference
 implementations the benchmark compares against (a local path or a git repository, its key files,

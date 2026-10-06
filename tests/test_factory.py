@@ -513,3 +513,37 @@ def test_a_brief_with_nothing_to_change_is_done_not_retried(tmp_path):
     loop.worker(0)
     rows = {r["item"]: r["status"] for r in f.store.q("SELECT * FROM backlog")}
     assert rows["item one"] == "blocked", "an item that keeps yielding no change must stop being retried"
+
+
+def test_optimize_stops_at_its_target_and_audit_starts_after(tmp_path):
+    repo = make_project(tmp_path, bug=False)
+    p = write_config(tmp_path, repo)
+    import yaml
+    c = yaml.safe_load(p.read_text())
+    c["benchmark"] = {"command": "echo 2.5", "target": 3, "repeats": 1}
+    c["roles"]["optimizer"] = {"provider": "fake"}
+    c["loops"]["optimize"] = {"enabled": True}
+    c["loops"]["audit"] = {"enabled": False, "after": ["implement", "optimize"]}
+    p.write_text(yaml.safe_dump(c))
+    f = Factory.from_path(p)
+    from ff.loops import AuditLoop, OptimizeLoop
+    audit = AuditLoop(f)
+    assert "optimize" in audit.waiting_for()
+    opt = OptimizeLoop(f)
+    opt.stop.wait = lambda t=None: False          # do not sleep in the test
+    opt.worker(0)
+    assert not f.store.q("SELECT * FROM runs"), "no experiment once the target is met"
+    assert any(e["kind"] == "target-reached" for e in f.store.events())
+    assert audit.waiting_for() == ""
+    assert f.status()["optimize_target"] == {"target": 3, "reached": True}
+    # main moves: the audit waits until the optimizer has measured the new main
+    (repo / "NOTE.txt").write_text("x")
+    git(repo, "add", "-A")
+    git(repo, "-c", "user.name=t", "-c", "user.email=t@x", "commit", "-q", "-m", "move main")
+    assert "optimize" in audit.waiting_for()
+    c["loops"]["audit"]["after"] = ["optimize"]
+    c["benchmark"].pop("target")
+    p.write_text(yaml.safe_dump(c))
+    from ff.config import ConfigError, load
+    with pytest.raises(ConfigError):
+        load(p)

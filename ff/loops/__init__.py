@@ -316,6 +316,12 @@ class OptimizeLoop(Loop):
             self.store.set_flag(key, str(v))
         return v
 
+    def at_target(self, value: float) -> bool:
+        t = self.cfg.benchmark.target
+        if t is None:
+            return False
+        return value <= t if self.cfg.benchmark.direction == "lower" else value >= t
+
     def better(self, base: float, cand: float) -> float:
         gain = (base - cand) / base if self.cfg.benchmark.direction == "lower" else (cand - base) / base
         return gain * 100
@@ -327,6 +333,19 @@ class OptimizeLoop(Loop):
         if base is None:
             self.stop.wait(600)
             return
+        main = sha(self.cfg.project.repo, self.cfg.project.main_branch)
+        if self.at_target(base):
+            # the goal is met: no more experiments (each costs an agent) unless main moves past it again
+            if self.store.flag("optimize:at-target") != main:
+                self.store.set_flag("optimize:at-target", main)
+                self.log("target-reached", f"benchmark {base} meets the target {self.cfg.benchmark.target} on "
+                                           f"{main[:10]}; the optimize loop stops until main changes")
+            self.stop.wait(300)
+            return
+        if self.store.flag("optimize:at-target"):
+            self.store.set_flag("optimize:at-target", None)
+            self.log("target-lost", f"benchmark {base} misses the target {self.cfg.benchmark.target} on "
+                                    f"{main[:10]}; optimizing again")
         hist = self.store.q("SELECT idea, baseline, candidate, kept, reason FROM experiments ORDER BY id DESC LIMIT ?",
                             (self.cfg.optimize.history,))
         lines = [f"- {'KEPT' if h['kept'] else 'reverted'}: {h['idea']} ({h['baseline']} -> {h['candidate']}; {h['reason']})"
@@ -381,6 +400,19 @@ FINDINGS_EXTRA = (', "findings": [{"title": "...", "severity": "critical|high|me
 class AuditLoop(Loop):
     name = "audit"
 
+    def waiting_for(self) -> str:
+        """What `loops.audit.after` still waits for ("" when the audit may run)."""
+        out = []
+        after = self.cfg.audit.after
+        if "implement" in after and self.store.q("SELECT 1 FROM backlog WHERE status IN ('open', 'running') "
+                                                 "AND NOT item LIKE 'brief: %' LIMIT 1"):
+            out.append("implement (open backlog items)")
+        if "optimize" in after:
+            main = sha(self.cfg.project.repo, self.cfg.project.main_branch)
+            if self.store.flag("optimize:at-target") != main:
+                out.append(f"optimize (benchmark.target {self.cfg.benchmark.target} not yet met on main)")
+        return "; ".join(out)
+
     def worker(self, i: int):
         a = self.cfg.audit
         last = self.store.q("SELECT * FROM rounds ORDER BY n DESC LIMIT 1")
@@ -390,6 +422,14 @@ class AuditLoop(Loop):
             return False
         if not self.wait_unpaused():
             return False
+        waiting = self.waiting_for()
+        if waiting:
+            if self.store.flag("audit:waiting") != waiting:
+                self.store.set_flag("audit:waiting", waiting)
+                self.log("waiting", f"audit waits for: {waiting}")
+            self.stop.wait(120)
+            return
+        self.store.set_flag("audit:waiting", None)
         repo, main = self.cfg.project.repo, self.cfg.project.main_branch
         base = sha(repo, main)
         prev_base = last[0]["base_commit"] if last else None

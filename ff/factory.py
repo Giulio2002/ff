@@ -167,6 +167,11 @@ class Factory:
             "language": self.cfg.project.language,
             "main": git(self.cfg.project.repo, "rev-parse", "--short", self.cfg.project.main_branch, check=False),
             "paused": paused,
+            "optimize_target": ({"target": self.cfg.benchmark.target,
+                                 "reached": s.flag("optimize:at-target") == git(self.cfg.project.repo, "rev-parse",
+                                                                                self.cfg.project.main_branch, check=False)}
+                                if self.cfg.benchmark.target is not None else None),
+            "audit_waiting": s.flag("audit:waiting") or "",
             "running": [dict(r) | {"for_s": round(time.time() - (r["started"] or time.time()))} for r in running],
             "last_gate": dict(gate[0]) if gate else None,
             "open_decisions": [dict(d) | {"options": json.loads(d["options"])} for d in decisions],

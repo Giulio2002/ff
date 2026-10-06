@@ -137,6 +137,7 @@ class Benchmark:
     metric: str = r"([0-9.]+)"     # regex; group 1 is the number
     direction: str = "lower"       # lower or higher is better
     min_improvement_pct: float = 1.0
+    target: float | None = None    # the goal: once main meets it the optimize loop stops (and audit may start)
     repeats: int = 3
     timeout_minutes: float = 30
     references: list[Reference] = field(default_factory=list)
@@ -176,6 +177,8 @@ class AuditLoop:
     fixer: str = "fixer"
     fixers: int = 2
     max_rounds: int = 10
+    after: list[str] = field(default_factory=list)   # start once these loops are finished: implement (backlog
+                                                     # empty) and/or optimize (benchmark.target met on main)
     stop_when_critical_at_most: int = 0
     confirm_each_round: bool = True   # ask the human (through the coordinator) before another round
     known_limitations_file: str = "KNOWN_LIMITATIONS.md"
@@ -355,6 +358,13 @@ def load(path: str | os.PathLike) -> Config:
             raise ConfigError("loops.optimize is enabled but benchmark.command is empty")
     if audit.enabled:
         used += list(audit.flavors.values()) + [audit.judge, audit.fixer]
+    for dep in audit.after:
+        if dep not in ("implement", "optimize"):
+            raise ConfigError(f"loops.audit.after: unknown loop '{dep}' (implement, optimize)")
+    if "optimize" in audit.after and not optimize.enabled:
+        raise ConfigError("loops.audit.after names optimize, which is not enabled")
+    if "optimize" in audit.after and benchmark.target is None:
+        raise ConfigError("loops.audit.after names optimize, which only finishes when benchmark.target is set")
     coordinator = _take(raw, "coordinator", "coordinator")
     for r in used + [coordinator]:
         if r not in roles:

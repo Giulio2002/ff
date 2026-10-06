@@ -261,6 +261,11 @@ def cmd_status(a):
               + (f" ({g['reason']})" if g["status"] == "red" else ""))
     if s["backlog"]:
         print("backlog: " + ", ".join(f"{k} {v}" for k, v in s["backlog"].items()))
+    if s.get("optimize_target"):
+        t = s["optimize_target"]
+        print(f"optimize target {t['target']}: " + ("reached on main, optimizer idle" if t["reached"] else "not met"))
+    if s.get("audit_waiting"):
+        print(f"audit waits for: {s['audit_waiting']}")
     if s["audit_round"]:
         r = s["audit_round"]
         print(f"audit round {r['n']}: {r['status']} {r['counts'] or ''}")
@@ -626,7 +631,8 @@ def cmd_subagent(a):
 
 IMPORTANT = ("gate-green", "gate-red", "agent-end", "launch-error", "error", "item-done", "item-blocked", "note",
              "decision", "accounts-exhausted", "account-switch", "limit", "experiment-kept", "experiment-reverted",
-             "round-start", "round-end", "findings", "fixed", "fix-failed", "audit-done", "config-reloaded")
+             "round-start", "round-end", "findings", "fixed", "fix-failed", "audit-done", "config-reloaded",
+             "target-reached", "target-lost", "waiting")
 
 
 def _event_line(e) -> str:
@@ -659,7 +665,14 @@ def cmd_statusline(a):
         parts.append(f"gate #{g[0]['id']} {dict(green='✓', red='✗').get(g[0]['status'], '…')}")
     exp = st.q("SELECT candidate FROM experiments WHERE kept = 1 ORDER BY id DESC LIMIT 1")
     if exp and exp[0]["candidate"] is not None:
-        parts.append(f"bench {exp[0]['candidate']:g}")
+        t = f.cfg.benchmark.target
+        parts.append(f"bench {exp[0]['candidate']:g}" + (f"/{t:g}" if t is not None else "")
+                     + (" ✓" if st.flag("optimize:at-target") else ""))
+    rnd = st.q("SELECT n, status FROM rounds ORDER BY n DESC LIMIT 1")
+    if rnd:
+        parts.append(f"audit r{rnd[0]['n']} {rnd[0]['status']}")
+    elif st.flag("audit:waiting"):
+        parts.append("audit waiting")
     cost = st.q("SELECT SUM(json_extract(usage, '$.cost_usd')) c FROM runs")[0]["c"] or 0
     parts.append(f"${cost:.0f}")
     attention = st.q("SELECT COUNT(*) n FROM decisions WHERE answer IS NULL")[0]["n"]

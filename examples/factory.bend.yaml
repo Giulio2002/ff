@@ -39,6 +39,7 @@ benchmark:
   metric: '"decode_ns":\s*([0-9.]+)'
   direction: lower
   min_improvement_pct: 2
+  # target: 3.0                  # the goal: once main meets it the optimize loop stops experimenting
   repeats: 3
   # The fastest baseline the benchmark compares against. The optimizer is told to study how it gets
   # its speed and port the ideas (proved). `ff references` fetches and lists them.
@@ -162,6 +163,7 @@ loops:
     fixer: fixer
     fixers: 3
     max_rounds: 8
+    after: [implement, optimize]  # start once the backlog is empty and benchmark.target is met (optional)
     stop_when_critical_at_most: 0
     confirm_each_round: true
     known_limitations_file: KNOWN_LIMITATIONS.md
