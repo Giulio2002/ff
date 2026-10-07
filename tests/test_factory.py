@@ -163,7 +163,11 @@ def test_audit_round_judge_fix_and_evidence(tmp_path):
     assert ff(["--config", str(p), "freeze", "--yes"]) == 0
     from ff.loops import AuditLoop
     loop = AuditLoop(f)
+    f.store.x("INSERT INTO briefs (loop, text, status, ts) VALUES ('audit', 'FOCUS-ON-THE-GLUE', 'open', 0)")
     loop.worker(0)
+    for r in f.store.q("SELECT id FROM runs WHERE role LIKE 'auditor_%'"):
+        assert "FOCUS-ON-THE-GLUE" in (f.runner.runs_dir / r["id"] / "prompt.md").read_text(), \
+            "every auditor of the round gets the coordinator's brief"
     rows = {r["title"]: r["status"] for r in f.store.q("SELECT * FROM findings")}
     assert rows["mutation: missing law add_comm_spec"] == "fixed"
     assert rows["crash: missing law add_comm_spec"] == "fixed", "a duplicate is closed by its primary's fix"

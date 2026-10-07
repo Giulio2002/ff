@@ -473,7 +473,9 @@ class AuditLoop(Loop):
             stage = "audit"
 
         if stage == "audit":
-            # 1. fresh auditors, in parallel; each in its own worktree of main
+            # 1. fresh auditors, in parallel; each in its own worktree of main. The coordinator's
+            # briefs are for the round: every auditor gets all of them.
+            briefs = self.store.take_briefs(self.name)
             def audit(flavor_role):
                 flavor, role = flavor_role
                 rid, wt, br = self.fresh_tree(role)
@@ -483,7 +485,6 @@ class AuditLoop(Loop):
                         since = prev_base or git(repo, "rev-list", "--max-parents=0", main).splitlines()[0]
                         changes = git(repo, "log", "--stat", "--format=%n%h %s", f"{since}..{main}", check=False)
                         task += f"\n\nChanges on main since the last round ({since[:10]}..{base[:10]}):\n{changes[-20000:]}"
-                    briefs = self.store.take_briefs(self.name)
                     if briefs:
                         task += "\n\nGuidance from the coordinator:\n" + "\n".join(briefs)
                     r = self.f.runner.run(role, task, loop=self.name, worktree=wt, branch=br, run_id=rid,
