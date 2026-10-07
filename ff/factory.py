@@ -12,7 +12,7 @@ from pathlib import Path
 from .agents import FINAL, Runner
 from .config import Config, load
 from .gate import Gate
-from .git import Workspaces, git
+from .git import Workspaces, git, is_ancestor, sha
 from .store import Store
 
 
@@ -85,9 +85,9 @@ class Factory:
         # is flagged cycle-open until the cycle ends, and is adopted like a running one
         open_ids = {k["key"].split(":", 1)[1] for k in self.store.q("SELECT key FROM flags WHERE key LIKE 'cycle-open:%'")}
         rows = self.store.q("SELECT * FROM runs WHERE (status IN ('running', 'queued') OR id IN (%s)) AND loop IN "
-                            "('implement', 'optimize', 'audit') ORDER BY started" % ",".join("?" * len(open_ids)),
+                            "('specify', 'implement', 'optimize', 'audit') ORDER BY started" % ",".join("?" * len(open_ids)),
                             tuple(open_ids)) if open_ids else self.store.q(
-            "SELECT * FROM runs WHERE status IN ('running', 'queued') AND loop IN ('implement', 'optimize', 'audit') "
+            "SELECT * FROM runs WHERE status IN ('running', 'queued') AND loop IN ('specify', 'implement', 'optimize', 'audit') "
             "ORDER BY started")
         for r in rows:
             if r["status"] in FINAL:
@@ -129,9 +129,89 @@ class Factory:
                              f"({', '.join(adopted)}), stopped {len(stopped)} ({', '.join(stopped)})")
         return adopted, stopped
 
+    # ---------------------------------------------------------------- the repository
+
+    def ensure_repo(self) -> list[str]:
+        """Make the target repository exist and be wired: a git repo on main_branch (created empty if
+        missing), and with project.github, the GitHub repository (created with `gh` if missing, with
+        project.visibility), set as project.remote, with main_branch pushed. Idempotent; returns what
+        it did."""
+        import subprocess
+        p = self.cfg.project
+        did = []
+        if not (p.repo / ".git").exists():
+            p.repo.mkdir(parents=True, exist_ok=True)
+            git(p.repo, "init", "-q", "-b", p.main_branch)
+            git(p.repo, "-c", "user.name=formal-factory", "-c", "user.email=factory@localhost",
+                "commit", "-q", "--allow-empty", "-m", "init")
+            did.append(f"created the git repository {p.repo} on {p.main_branch}")
+        if not p.github:
+            return did
+        if subprocess.run(["gh", "repo", "view", p.github, "--json", "name"], capture_output=True).returncode != 0:
+            r = subprocess.run(["gh", "repo", "create", p.github, f"--{p.visibility}",
+                                "--description", f"{p.name}: built and proved by formal-factory"],
+                               capture_output=True, text=True)
+            if r.returncode != 0:
+                raise RuntimeError(f"gh repo create {p.github} failed: {r.stderr.strip()}")
+            did.append(f"created the {p.visibility} GitHub repository {p.github}")
+        url = f"https://github.com/{p.github}.git"
+        cur = git(p.repo, "config", "--get", f"remote.{p.remote}.url", check=False)   # unrewritten
+        if not cur:
+            git(p.repo, "remote", "add", p.remote, url)
+            did.append(f"remote {p.remote} -> {url}")
+        elif cur.rstrip("/").removesuffix(".git").lower() != url.removesuffix(".git").lower() and \
+                not cur.rstrip("/").removesuffix(".git").endswith(p.github):
+            git(p.repo, "remote", "set-url", p.remote, url)
+            did.append(f"remote {p.remote}: {cur} -> {url}")
+        r = subprocess.run(["git", "push", "-q", "-u", p.remote, f"{p.main_branch}:{p.main_branch}"],
+                           cwd=p.repo, capture_output=True, text=True)
+        if r.returncode != 0:
+            raise RuntimeError(f"pushing {p.main_branch} to {p.remote} failed: {r.stderr.strip()}")
+        did.append(f"{p.main_branch} pushed to {p.github}")
+        for d in did:
+            self.store.event("factory", "repo", d)
+        return did
+
+    def freeze(self, force: bool = False) -> int:
+        """Lock the current frozen statements on main (the human approving the specification).
+        Returns how many statements were locked."""
+        import fcntl
+        import shutil
+        from . import frozen
+        cfg = self.cfg
+        repo, main = cfg.project.repo, cfg.project.main_branch
+        if git(repo, "show", f"{main}:{cfg.spec.lock_file}", check=False) and not force:
+            raise RuntimeError(f"{cfg.spec.lock_file} already exists on {main}")
+        with self.main_view("freeze") as view:
+            stmts = frozen.collect(view, cfg.spec.frozen, cfg.project.language)
+        tmp = cfg.project.state_dir / "freeze"
+        shutil.rmtree(tmp, ignore_errors=True)
+        git(repo, "worktree", "add", "-q", "--detach", str(tmp), main)
+        try:
+            (tmp / cfg.spec.lock_file).write_text(frozen.dump_lock(frozen.lock_of(stmts)))
+            git(tmp, "add", cfg.spec.lock_file)
+            git(tmp, "-c", "user.name=formal-factory", "-c", "user.email=factory@localhost", "commit", "-q",
+                "--allow-empty", "-m", f"freeze {len(stmts)} statements")
+            new = git(tmp, "rev-parse", "HEAD")
+            with open(self.gate.dir / "gate.lock", "w") as lk:     # main moves only under the gate's lock
+                fcntl.flock(lk, fcntl.LOCK_EX)
+                if not is_ancestor(repo, sha(repo, main), new):
+                    raise RuntimeError("main moved while freezing; try again")
+                if git(repo, "symbolic-ref", "-q", "HEAD", check=False) == f"refs/heads/{main}":
+                    git(repo, "reset", "-q", "--keep", new)
+                else:
+                    git(repo, "update-ref", f"refs/heads/{main}", new)
+                if cfg.project.remote:
+                    git(repo, "push", "-q", cfg.project.remote, f"{main}:{main}", check=False)
+        finally:
+            git(repo, "worktree", "remove", "--force", str(tmp), check=False)
+        self.store.event("factory", "frozen", f"locked {len(stmts)} statements on {main}")
+        return len(stmts)
+
     def start_loops(self, names: list[str] | None = None) -> None:
         from .loops import LOOPS
-        enabled = {"implement": self.cfg.implement, "optimize": self.cfg.optimize, "audit": self.cfg.audit}
+        enabled = {"specify": self.cfg.specify, "implement": self.cfg.implement, "optimize": self.cfg.optimize,
+                   "audit": self.cfg.audit}
         for name, cls in LOOPS.items():
             if names and name not in names:
                 continue
@@ -142,7 +222,8 @@ class Factory:
         # adopt what a previous daemon left running before the workers take new items
         self.reconcile(self.loops)
         for name, loop in self.loops.items():
-            workers = {"implement": self.cfg.implement.workers, "optimize": self.cfg.optimize.workers, "audit": 1}[name]
+            workers = {"specify": self.cfg.specify.workers, "implement": self.cfg.implement.workers,
+                       "optimize": self.cfg.optimize.workers, "audit": 1}[name]
             # an adopted cycle occupies a worker's place
             busy = sum(1 for t in loop.threads if t.name.startswith(f"{name}-adopt-"))
             loop.start(max(0, workers - busy) if name != "audit" else workers)

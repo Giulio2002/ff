@@ -159,6 +159,7 @@ let UNIT = "";
 const fmtx = v => v == null ? "–" : fmtn(v) + UNIT;
 
 const PHASE_TEXT = {
+  specify: "Agents are writing the specification. A human approves it before anything is built against it.",
   implement: "Agents are writing the program and proving each law of the contract.",
   optimize: "Everything is proved. Agents are now making it faster, one proved change at a time.",
   audit: "Proved and fast enough. Fresh auditors are trying to break it; real problems get fixed.",
@@ -172,7 +173,7 @@ function render(st) {
   document.title = st.project + " · Formal Factory";
   $("project").textContent = st.project;
   $("lang").textContent = st.language;
-  $("main").textContent = "main " + st.main;
+  $("main").innerHTML = st.github ? `<a style="color:inherit" href="https://github.com/${esc(st.github)}">${esc(st.github)}</a> · main ${esc(st.main)}` : "main " + esc(st.main);
 
   // alerts
   let al = "";
@@ -182,7 +183,8 @@ function render(st) {
 
   // phases
   const idx = st.phases.indexOf(st.phase);
-  const sub = { implement: () => { const t = st.backlog.length, d = st.backlog.filter(b => b.status === "done").length; return t ? `${d}/${t} items` : ""; },
+  const sub = { specify: () => { const s = st.backlog.filter(b => b.loop === "specify"), d = s.filter(b => b.status === "done").length; return s.length ? `${d}/${s.length} parts` : ""; },
+                implement: () => { const s = st.backlog.filter(b => b.loop !== "specify"), d = s.filter(b => b.status === "done").length; return s.length ? `${d}/${s.length} items` : ""; },
                 optimize: () => st.benchmark.target != null ? `target ${fmtx(st.benchmark.target)}` : "",
                 audit: () => st.audit.rounds.length ? `${st.audit.rounds.length} round${st.audit.rounds.length > 1 ? "s" : ""}` : "",
                 done: () => "" };
@@ -194,7 +196,8 @@ function render(st) {
 
   // stats
   const b = st.benchmark, gc = st.gate_counts;
-  const doneItems = st.backlog.filter(x => x.status === "done").length;
+  const impl = st.backlog.filter(x => x.loop !== "specify");
+  const doneItems = impl.filter(x => x.status === "done").length;
   const rounds = st.audit.rounds, allF = rounds.flatMap(r => r.findings);
   const fixed = allF.filter(f => f.status === "fixed").length, documented = allF.filter(f => f.status === "documented").length;
   let speedCard = `<div class="big">${fmtx(b.current)}</div><div class="sub">current benchmark`;
@@ -207,8 +210,8 @@ function render(st) {
     speedCard += `<div class="bar"><i style="width:${b.at_target ? 100 : pct}%;background:${b.at_target ? "var(--good)" : "var(--accent)"}"></i></div>`;
   }
   const cards = [
-    ["Proofs", `<div class="big">${doneItems}/${st.backlog.length || 0}</div><div class="sub">contract items done</div>
-      <div class="bar"><i style="width:${st.backlog.length ? doneItems / st.backlog.length * 100 : 0}%;background:var(--good)"></i></div>`],
+    ["Proofs", `<div class="big">${doneItems}/${impl.length || 0}</div><div class="sub">contract items done</div>
+      <div class="bar"><i style="width:${impl.length ? doneItems / impl.length * 100 : 0}%;background:var(--good)"></i></div>`],
     ["Speed", speedCard],
     ["Gate", `<div class="big"><span class="good">${gc.green || 0}</span> <span class="dim" style="font-size:18px">merged</span></div>
       <div class="sub">${gc.red || 0} rejected${gc.running ? ` · ${gc.running} checking now` : ""}</div>`],

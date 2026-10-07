@@ -166,7 +166,12 @@ class Gate:
         else:
             git(self.repo, "update-ref", f"refs/heads/{self.main}", final, expected_main)
         if self.cfg.project.remote:
-            git(self.repo, "push", "-q", self.cfg.project.remote, f"{self.main}:{self.main}")
+            # the merge stands even when the push fails (network, credentials): the next green pushes again
+            out = subprocess.run(["git", "push", "-q", self.cfg.project.remote, f"{self.main}:{self.main}"],
+                                 cwd=self.repo, capture_output=True, text=True)
+            if out.returncode != 0:
+                self.store.event("gate", "push-failed", f"pushing {self.main} to {self.cfg.project.remote} failed: "
+                                                        f"{out.stderr.strip()[:300]}")
         return True
 
     def _remote(self, branch: str, cand: str) -> Verdict:

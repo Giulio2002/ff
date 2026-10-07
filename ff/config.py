@@ -60,6 +60,11 @@ class Project:
     # How agents change the program: "direct" (edit code and proofs) or "generators" (edit generator
     # scripts; commands.regenerate writes the `generated` files, which nobody edits by hand).
     workflow: str = "direct"
+    # A GitHub repository ("owner/name") the factory manages: created with `gh` if it does not exist,
+    # wired as `remote` (default origin), and main_branch (the aggregated branch every green gate
+    # lands on) pushed to it after each merge.
+    github: str | None = None
+    visibility: str = "private"   # public | private, when the factory creates the repository
 
 
 @dataclass
@@ -163,6 +168,18 @@ class ImplementLoop:
 
 
 @dataclass
+class SpecifyLoop:
+    """Agents draft the frozen specification itself, item by item from its own backlog (a missing
+    opcode, an unwritten rule). When that backlog is empty the human is asked to review and approve
+    it; approving freezes it, and only then does the implement loop start."""
+    enabled: bool = False
+    role: str = "specifier"
+    workers: int = 2
+    max_attempts: int = 3
+    backlog_command: str = ""
+
+
+@dataclass
 class OptimizeLoop:
     enabled: bool = False
     role: str = "optimizer"
@@ -221,6 +238,7 @@ class Config:
     audit: AuditLoop
     limits: Limits
     accounts: Accounts = field(default_factory=Accounts)
+    specify: SpecifyLoop = field(default_factory=SpecifyLoop)
     coordinator: str = "coordinator"
 
     def role(self, name: str) -> Role:
@@ -263,7 +281,8 @@ def load(path: str | os.PathLike) -> Config:
     _no_extra(raw, top, "factory.yaml")
 
     p = _take(raw, "project", required=True, where="factory.yaml")
-    _no_extra(p, {"name", "repo", "main_branch", "remote", "language", "state_dir", "workflow"}, "project")
+    _no_extra(p, {"name", "repo", "main_branch", "remote", "language", "state_dir", "workflow", "github",
+                  "visibility"}, "project")
     language = _take(p, "language", "bend")
     if language not in LANGUAGES:
         raise ConfigError(f"project.language must be one of {LANGUAGES}, got '{language}'")
@@ -275,8 +294,15 @@ def load(path: str | os.PathLike) -> Config:
     workflow = _take(p, "workflow", "direct")
     if workflow not in ("direct", "generators"):
         raise ConfigError("project.workflow must be 'direct' or 'generators'")
+    github = _take(p, "github")
+    if github is not None and not re.fullmatch(r"[\w.-]+/[\w.-]+", str(github)):
+        raise ConfigError(f"project.github must be 'owner/name', got '{github}'")
+    visibility = _take(p, "visibility", "private")
+    if visibility not in ("public", "private"):
+        raise ConfigError("project.visibility must be 'public' or 'private'")
     project = Project(name=name, repo=repo, main_branch=_take(p, "main_branch", "main"),
-                      remote=_take(p, "remote"), language=language, state_dir=state, workflow=workflow)
+                      remote=_take(p, "remote", "origin" if github else None), language=language,
+                      state_dir=state, workflow=workflow, github=github, visibility=visibility)
 
     ck = dict(DEFAULT_CHECKERS[language])
     user_ck = _take(raw, "checker", {}) or {}
@@ -344,7 +370,7 @@ def load(path: str | os.PathLike) -> Config:
                 raise ConfigError(f"roles.{role.name}.subagents: no role named '{s}'")
 
     loops = _take(raw, "loops", {}) or {}
-    _no_extra(loops, {"implement", "optimize", "audit"}, "loops")
+    _no_extra(loops, {"specify", "implement", "optimize", "audit"}, "loops")
 
     def mk(cls, key):
         d = loops.get(key, {}) or {}
@@ -352,10 +378,15 @@ def load(path: str | os.PathLike) -> Config:
         return cls(**d)
 
     implement, optimize, audit = mk(ImplementLoop, "implement"), mk(OptimizeLoop, "optimize"), mk(AuditLoop, "audit")
+    specify = mk(SpecifyLoop, "specify")
     for flavor in audit.flavors:
         if flavor not in FLAVORS:
             raise ConfigError(f"loops.audit.flavors: unknown flavor '{flavor}' (known: {FLAVORS})")
     used = []
+    if specify.enabled:
+        used.append(specify.role)
+        if not specify.backlog_command:
+            raise ConfigError("loops.specify is enabled but has no backlog_command")
     if implement.enabled:
         used.append(implement.role)
     if optimize.enabled:
@@ -405,5 +436,5 @@ def load(path: str | os.PathLike) -> Config:
     return Config(path=path, project=project, commands=commands,
                   generated=generated, checker=checker, spec=spec,
                   benchmark=benchmark, gate=gate, providers=providers, roles=roles,
-                  implement=implement, optimize=optimize, audit=audit, limits=Limits(**lim_raw),
+                  implement=implement, optimize=optimize, audit=audit, limits=Limits(**lim_raw), specify=specify,
                   accounts=accounts, coordinator=coordinator)

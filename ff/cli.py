@@ -58,6 +58,8 @@ def main(argv: list[str] | None = None) -> int:
                                                "(0.0.0.0:8080 to expose it)")
     p.add_argument("--webui-token", default=os.environ.get("FF_WEBUI_TOKEN", ""),
                    help="require this token for the page (open it once as /?token=...)")
+    p = sub.add_parser("repo", help="create and wire the target repository (project.github: create it, set the "
+                                    "remote, push the aggregated branch)")
     p = sub.add_parser("webui", help="serve the read-only progress page on its own (next to a running daemon)")
     p.add_argument("--listen", default="127.0.0.1:8080", help="[host:]port; 0.0.0.0:8080 to expose it")
     p.add_argument("--token", default=os.environ.get("FF_WEBUI_TOKEN", ""),
@@ -228,6 +230,12 @@ def cmd_run(a):
         srv = serve(f, host or "127.0.0.1", int(port))
         threading.Thread(target=srv.serve_forever, daemon=True).start()
         print(f"steering API on http://{host or '127.0.0.1'}:{port}  token: {srv.token}", flush=True)
+    try:
+        for d in f.ensure_repo():
+            print(d, flush=True)
+    except RuntimeError as e:
+        print(f"repository: {e}", file=sys.stderr, flush=True)
+        return 1
     web = None
     if a.webui:
         import threading
@@ -253,6 +261,14 @@ def cmd_run(a):
     # do not wait for the loops' threads: they wait on agents that run in processes of their own and
     # that the next daemon adopts (an audit round's fixer pool would otherwise hold the exit for hours)
     os._exit(0)
+
+
+def cmd_repo(a):
+    f = _factory(a)
+    did = f.ensure_repo()
+    p = f.cfg.project
+    print("\n".join(did) if did else f"{p.repo} is set up" + (f" and wired to {p.github}" if p.github else ""))
+    print(f"aggregated branch: {p.main_branch}" + (f" (pushed to {p.remote} after every green gate)" if p.remote else ""))
 
 
 def cmd_webui(a):
@@ -552,23 +568,9 @@ def cmd_freeze(a):
     if not a.yes:
         print("re-run with --yes to commit the lock on main")
         return 0
-    tmp = cfg.project.state_dir / "freeze"
-    shutil.rmtree(tmp, ignore_errors=True)
-    _git(repo, "worktree", "add", "-q", "--detach", str(tmp), main)
-    try:
-        (tmp / cfg.spec.lock_file).write_text(frozen.dump_lock(frozen.lock_of(stmts)))
-        _git(tmp, "add", cfg.spec.lock_file)
-        _git(tmp, "-c", "user.name=formal-factory", "-c", "user.email=factory@localhost", "commit", "-q", "-m",
-             f"freeze {len(stmts)} statements")
-        new = _git(tmp, "rev-parse", "HEAD")
-        head = _git(repo, "symbolic-ref", "-q", "HEAD", check=False)
-        if head == f"refs/heads/{main}":
-            _git(repo, "reset", "-q", "--keep", new)
-        else:
-            _git(repo, "update-ref", f"refs/heads/{main}", new)
-    finally:
-        _git(repo, "worktree", "remove", "--force", str(tmp), check=False)
-    print(f"locked {len(stmts)} statements on {main}")
+    n = f.freeze(force=bool(a.force))
+    f.store.set_flag("spec:approved", str(time.time()))     # a human froze it: the specification is approved
+    print(f"locked {n} statements on {main}")
 
 
 def cmd_note(a):

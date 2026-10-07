@@ -827,3 +827,75 @@ def test_the_web_page_shows_progress_and_honours_its_token(tmp_path):
     req = urllib.request.Request(f"http://127.0.0.1:{port}/state.json", headers={"cookie": cookie})
     assert json.loads(urllib.request.urlopen(req).read())["project"] == f.cfg.project.name
     srv.shutdown()
+
+
+@needs_bend
+def test_agents_draft_the_spec_a_human_approves_it_then_implementation_starts(tmp_path):
+    repo = make_project(tmp_path, bug=False)
+    p = write_config(tmp_path, repo)
+    import yaml
+    c = yaml.safe_load(p.read_text())
+    c["providers"]["drafter"] = {"kind": "script", "command": ["sh", "-c",
+        "cat >/dev/null; mkdir -p spec && echo 'the add rule' > spec/notes.md && git add -A && "
+        "git -c user.name=a -c user.email=a@x commit -qm 'spec: notes' && echo drafted"]}
+    c["roles"]["specifier"] = {"provider": "drafter", "timeout_minutes": 1}
+    c["loops"]["specify"] = {"enabled": True, "workers": 1,
+                             "backlog_command": "test -f spec/notes.md || printf 'spec:notes\\twrite the notes\\n'"}
+    c["loops"]["implement"] = {"enabled": True, "backlog_command": "printf 'law:x\\n'"}
+    p.write_text(yaml.safe_dump(c))
+    f = Factory.from_path(p)
+    from ff.loops import ImplementLoop, SpecifyLoop
+    impl = ImplementLoop(f)
+    impl.stop.wait = lambda t=None: False
+    impl.worker(0)
+    assert not f.store.q("SELECT 1 FROM runs WHERE role = 'implementer'"), "nothing is built before approval"
+    spec = SpecifyLoop(f)
+    spec.stop.wait = lambda t=None: False
+    spec.worker(0)                                   # drafts spec/notes.md through the gate
+    assert "spec/notes.md" in git(repo, "ls-tree", "-r", "--name-only", "main")
+    assert f.store.q("SELECT status FROM backlog WHERE item = 'spec:notes'")[0]["status"] == "done"
+    spec.worker(0)                                   # backlog empty: asks the human
+    d = f.store.q("SELECT id, question FROM decisions WHERE answer IS NULL")
+    assert d and "specification is drafted" in d[0]["question"]
+    f.store.x("UPDATE decisions SET answer = 'approve' WHERE id = ?", (d[0]["id"],))
+    spec.worker(0)
+    assert f.store.flag("spec:approved")
+    assert "frozen.lock.json" in git(repo, "ls-tree", "-r", "--name-only", "main")
+    assert spec.worker(0) is False, "the specify loop is finished once approved"
+    impl.take()
+    assert f.store.q("SELECT loop FROM backlog WHERE item = 'law:x'")[0]["loop"] == "implement"
+
+
+def test_the_factory_creates_and_wires_its_repository(tmp_path, monkeypatch):
+    calls = []
+    bare = tmp_path / "remote.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(bare)], check=True)
+    real_run = subprocess.run
+
+    def fake_run(argv, *a, **k):                     # gh: the repository does not exist, then is created
+        if argv[:2] == ["gh", "repo"]:
+            calls.append(argv[2])
+            exists = "create" in calls[:-1]
+            return subprocess.CompletedProcess(argv, 1 if argv[2] == "view" and not exists else 0, "", "")
+        return real_run(argv, *a, **k)
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    repo = tmp_path / "new-target"
+    p = write_config(tmp_path, repo)
+    import yaml
+    c = yaml.safe_load(p.read_text())
+    c["project"].update(github="someone/new-target", visibility="public")
+    p.write_text(yaml.safe_dump(c))
+    f = Factory.from_path(p)
+    # the GitHub URL is replaced by the local bare repository for the push
+    real_git_remote = f"https://github.com/someone/new-target.git"
+    subprocess.run(["git", "config", "--global", f"url.{bare}.insteadOf", real_git_remote], check=False,
+                   env=dict(os.environ, HOME=str(tmp_path)))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    did = f.ensure_repo()
+    assert calls == ["view", "create"]
+    assert (repo / ".git").exists()
+    assert git(repo, "config", "--get", "remote.origin.url") == real_git_remote
+    assert any("pushed" in d for d in did)
+    assert git(bare, "rev-parse", "main")
+    assert f.ensure_repo() == ["main pushed to someone/new-target"], "idempotent: nothing created twice"
+    assert calls.count("create") == 1

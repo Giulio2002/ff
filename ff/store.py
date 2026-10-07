@@ -54,6 +54,8 @@ class Store:
         for col in ("account", "extra", "cycle"):
             if col not in cols:
                 self.db.execute(f"ALTER TABLE runs ADD COLUMN {col} TEXT")
+        if "loop" not in {r["name"] for r in self.db.execute("PRAGMA table_info(backlog)")}:
+            self.db.execute("ALTER TABLE backlog ADD COLUMN loop TEXT DEFAULT 'implement'")
 
     @property
     def db(self) -> sqlite3.Connection:

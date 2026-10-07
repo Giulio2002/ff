@@ -188,29 +188,39 @@ class Loop:
 
 class ImplementLoop(Loop):
     name = "implement"
+    task_intro = "Close this open item of the contract:"
     _pick = threading.Lock()
 
+    @property
+    def lc(self):
+        """This loop's settings (loops.implement, or loops.specify for the subclass)."""
+        return getattr(self.cfg, self.name)
+
+    @property
+    def _bkey(self) -> str:
+        return "backlog:main" if self.name == "implement" else f"backlog:main:{self.name}"
+
     def refresh_backlog(self) -> None:
-        cmd = self.cfg.implement.backlog_command
+        cmd = self.lc.backlog_command
         if not cmd:
             return
         # the backlog is a function of main: list it again only when main moved (a failed listing is
         # retried after 30 minutes). It can be expensive (it may run the checker over every file).
         import hashlib
         main = sha(self.cfg.project.repo, self.cfg.project.main_branch) + ":" + hashlib.sha1(cmd.encode()).hexdigest()[:8]
-        last = self.store.flag("backlog:main") or ""
+        last = self.store.flag(self._bkey) or ""
         if last == main or (last == "failed:" + main
-                            and time.time() - float(self.store.flag("backlog:failed-at") or 0) < 1800):
+                            and time.time() - float(self.store.flag(self._bkey + ":failed-at") or 0) < 1800):
             return
         with self.f.main_view("backlog") as view:
             code, out, secs, timed_out = run_cmd(cmd, view, 1800, self.cfg.limits.nice)
         if code != 0 or timed_out:
-            self.store.set_flag("backlog:main", "failed:" + main)
-            self.store.set_flag("backlog:failed-at", str(time.time()))
+            self.store.set_flag(self._bkey, "failed:" + main)
+            self.store.set_flag(self._bkey + ":failed-at", str(time.time()))
             self.log("error", f"backlog command {'timed out after %.0fs' % secs if timed_out else 'failed'} "
                               f"on {main[:10]} (retried when main moves, or in 30 min): {out[-500:]}")
             return
-        self.store.set_flag("backlog:main", main)
+        self.store.set_flag(self._bkey, main)
         # Each item is "<id>\t<description>" (or an object {"id", "task"} in a JSON list); a plain
         # line is its own id. The id is the item's identity: a description may change (a reworded
         # statement) without creating a second item while the first is still being worked on.
@@ -231,13 +241,13 @@ class ImplementLoop(Loop):
         now = time.time()
         current = {iid for iid, _ in pairs}
         for iid, desc in pairs:
-            self.store.x("INSERT OR IGNORE INTO backlog (item, status, attempts, updated, note) VALUES (?, 'open', 0, ?, ?)",
-                         (iid, now, desc))
+            self.store.x("INSERT OR IGNORE INTO backlog (item, status, attempts, updated, note, loop) "
+                         "VALUES (?, 'open', 0, ?, ?, ?)", (iid, now, desc, self.name))
             # the backlog command lists open work only: an item it lists again is open again
             # (a merged step that did not finish it, like a speed target still out of reach)
             self.store.x("UPDATE backlog SET status = 'open', attempts = 0 WHERE item = ? AND status = 'done'", (iid,))
             self.store.x("UPDATE backlog SET note = ? WHERE item = ? AND NOT item LIKE 'brief: %'", (desc, iid))
-        for r in self.store.q("SELECT item FROM backlog WHERE status IN ('open','blocked')"):
+        for r in self.store.q("SELECT item FROM backlog WHERE status IN ('open','blocked') AND loop = ?", (self.name,)):
             if r["item"] not in current and not r["item"].startswith("brief: "):
                 self.store.x("UPDATE backlog SET status = 'done', updated = ? WHERE item = ?", (now, r["item"]))
 
@@ -247,13 +257,14 @@ class ImplementLoop(Loop):
             briefs = self.store.take_briefs(self.name)
             if briefs:
                 item = "brief: " + briefs[0][:200]
-                self.store.x("INSERT OR REPLACE INTO backlog (item, status, attempts, updated, note) "
-                             "VALUES (?, 'running', 0, ?, ?)", (item, time.time(), briefs[0]))
+                self.store.x("INSERT OR REPLACE INTO backlog (item, status, attempts, updated, note, loop) "
+                             "VALUES (?, 'running', 0, ?, ?, ?)", (item, time.time(), briefs[0], self.name))
                 for b in briefs[1:]:
                     self.store.x("INSERT INTO briefs (loop, text, status, ts) VALUES (?, ?, 'open', ?)",
                                  (self.name, b, time.time()))
                 return item
-            r = self.store.q("SELECT item FROM backlog WHERE status = 'open' ORDER BY updated LIMIT 1")
+            r = self.store.q("SELECT item FROM backlog WHERE status = 'open' AND loop = ? ORDER BY updated LIMIT 1",
+                             (self.name,))
             if not r:
                 return None
             self.store.x("UPDATE backlog SET status = 'running', updated = ? WHERE item = ?", (time.time(), r[0]["item"]))
@@ -262,6 +273,13 @@ class ImplementLoop(Loop):
     def worker(self, i: int):
         if not self.wait_unpaused():
             return False
+        if self.name == "implement" and self.cfg.specify.enabled and not self.store.flag("spec:approved"):
+            # nothing is implemented against a specification nobody has approved yet
+            if self.store.flag("implement:waiting") != "spec":
+                self.store.set_flag("implement:waiting", "spec")
+                self.log("waiting", "implement waits for the specification to be approved and frozen")
+            self.stop.wait(120)
+            return
         item = self.take()
         if item is None:
             self.stop.wait(120)
@@ -271,11 +289,11 @@ class ImplementLoop(Loop):
     def run_item(self, item: str, resume=None) -> None:
         note = self.store.q("SELECT note FROM backlog WHERE item = ?", (item,))
         note = note[0]["note"] if note else None
-        task = note if item.startswith("brief: ") and note else f"Close this open item of the contract:\n\n{note or item}"
+        task = note if item.startswith("brief: ") and note else f"{self.task_intro}\n\n{note or item}"
         if resume is not None:
             task = json.loads(resume["cycle"] or "{}").get("task") or task
         try:
-            out = self.cycle(self.cfg.implement.role, task, max_attempts=self.cfg.implement.max_attempts,
+            out = self.cycle(self.lc.role, task, max_attempts=self.lc.max_attempts,
                              item=item, resume=resume)
         except Exception:
             # a crash must not leave the item claimed by nobody
@@ -291,7 +309,7 @@ class ImplementLoop(Loop):
             prev = self.store.q("SELECT attempts FROM backlog WHERE item = ?", (item,))
             if item.startswith("brief: "):
                 status = "done"
-            elif prev and prev[0]["attempts"] + 1 >= self.cfg.implement.max_attempts:
+            elif prev and prev[0]["attempts"] + 1 >= self.lc.max_attempts:
                 status = "blocked"
         self.store.x("UPDATE backlog SET status = ?, attempts = attempts + 1, run_id = ?, updated = ?, note = ? "
                      "WHERE item = ?", (status, out.run_ids[-1] if out.run_ids else None, time.time(),
@@ -306,6 +324,63 @@ class ImplementLoop(Loop):
         self.store.x("UPDATE backlog SET status = 'running', updated = ? WHERE item = ?", (time.time(), item))
         self.log("adopted", f"continuing {row['id']} on {item[:100]} after a daemon restart", row["id"])
         self.run_item(item, resume=row)
+
+
+# ===================================================================== specify
+
+class SpecifyLoop(ImplementLoop):
+    """Agents write the specification itself, item by item; the human approves it, which freezes
+    it. Implementation starts after that (ImplementLoop.worker waits for spec:approved)."""
+    name = "specify"
+    task_intro = ("Write this part of the specification. It will be frozen once a human approves it, "
+                  "so make it faithful to its source and easy to review side by side with it:")
+
+    def worker(self, i: int):
+        if not self.wait_unpaused():
+            return False
+        if self.store.flag("spec:approved"):
+            return False                      # frozen: this loop is finished
+        item = self.take()
+        if item is not None:
+            self.run_item(item)
+            return
+        left = self.store.q("SELECT item, status FROM backlog WHERE loop = 'specify' AND status IN "
+                            "('open', 'running', 'blocked')")
+        if left:                              # blocked items need a human (ff backlog reopen) first
+            self.stop.wait(120)
+            return
+        with self._pick:                      # one worker asks
+            self.ask_for_approval()
+        self.stop.wait(30)
+
+    def ask_for_approval(self) -> None:
+        main = sha(self.cfg.project.repo, self.cfg.project.main_branch)
+        asked = self.store.flag("spec:asked") or ""
+        if asked == "declined@" + main:
+            return                            # asked again once main moves (the requested changes landed)
+        did = asked.split("@")[0] if asked.endswith("@" + main) else ""
+        if not did:
+            for d in self.store.q("SELECT id FROM decisions WHERE answer IS NULL AND question LIKE 'The specification is drafted%'"):
+                self.store.x("UPDATE decisions SET answer = 'superseded', answered = ? WHERE id = ?", (time.time(), d["id"]))
+            did = str(self.store.ask(
+                f"The specification is drafted on main ({main[:10]}): every item of the spec backlog is done. "
+                f"Review {', '.join(self.cfg.spec.frozen)} in {self.cfg.project.repo} (or on GitHub). Approve "
+                f"to freeze it and start implementing; or answer anything else and brief the specify loop "
+                f"(`ff brief specify ...`) with what to change.", ["approve", "not yet"]))
+            self.store.set_flag("spec:asked", f"{did}@{main}")
+            self.log("waiting", "the specification is drafted: waiting for a human to approve it")
+        ans = self.store.answer(int(did))
+        if ans is None:
+            return
+        if ans.strip().lower() in ("approve", "approved", "yes", "y"):
+            n = self.f.freeze(force=True)
+            self.store.set_flag("spec:approved", str(time.time()))
+            self.log("spec-approved", f"the specification is approved: {n} statements frozen on main; "
+                                      f"implementation starts")
+        else:
+            self.store.set_flag("spec:asked", "declined@" + main)
+            self.log("spec-declined", f"the specification was not approved ({ans}); brief the specify loop "
+                                      f"with what to change: it is asked again once main moves")
 
 
 # ===================================================================== optimize
@@ -430,8 +505,9 @@ class AuditLoop(Loop):
         """What `loops.audit.after` still waits for ("" when the audit may run)."""
         out = []
         after = self.cfg.audit.after
-        if "implement" in after and self.store.q("SELECT 1 FROM backlog WHERE status IN ('open', 'running') "
-                                                 "AND NOT item LIKE 'brief: %' LIMIT 1"):
+        if "implement" in after and (self.store.q("SELECT 1 FROM backlog WHERE status IN ('open', 'running') "
+                                                  "AND loop = 'implement' AND NOT item LIKE 'brief: %' LIMIT 1")
+                                     or (self.cfg.specify.enabled and not self.store.flag("spec:approved"))):
             out.append("implement (open backlog items)")
         if "optimize" in after:
             main = sha(self.cfg.project.repo, self.cfg.project.main_branch)
@@ -711,4 +787,4 @@ class AuditLoop(Loop):
         return counts
 
 
-LOOPS = {"implement": ImplementLoop, "optimize": OptimizeLoop, "audit": AuditLoop}
+LOOPS = {"specify": SpecifyLoop, "implement": ImplementLoop, "optimize": OptimizeLoop, "audit": AuditLoop}

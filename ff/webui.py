@@ -32,12 +32,13 @@ SHOWN = {
     "item-done": "item done", "item-blocked": "item blocked", "decision": "waiting for a human",
     "decided": "decided", "accounts-exhausted": "out of credits", "launch-error": "agent could not start",
     "error": "error", "loop-start": "loop started", "round-resume": "audit round resumed",
-    "agent-end": "agent finished",
+    "agent-end": "agent finished", "spec-approved": "specification approved", "frozen": "specification frozen",
+    "spec-declined": "specification sent back", "push-failed": "push failed",
 }
 ROLE_WORDS = {
     "implementer": "Implementing", "optimizer": "Optimizing", "auditor_mutation": "Auditing (mutations)",
     "auditor_crash": "Auditing (hostile inputs)", "auditor_regression": "Auditing (regressions)",
-    "judge": "Judging findings", "fixer": "Fixing", "coordinator": "Coordinating",
+    "judge": "Judging findings", "fixer": "Fixing", "coordinator": "Coordinating", "specifier": "Writing the spec",
 }
 
 
@@ -60,7 +61,8 @@ def state(cfg, store: Store) -> dict:
     main = git(repo, "rev-parse", main_branch, check=False)
     bench = cfg.benchmark
 
-    backlog = [dict(item=r["item"], status=r["status"], attempts=r["attempts"], updated=r["updated"])
+    backlog = [dict(item=r["item"], status=r["status"], attempts=r["attempts"], updated=r["updated"],
+                    loop=r["loop"] or "implement")
                for r in store.q("SELECT * FROM backlog WHERE item NOT LIKE 'brief: %' ORDER BY item")]
     rounds = []
     for r in store.q("SELECT * FROM rounds ORDER BY n"):
@@ -73,9 +75,12 @@ def state(cfg, store: Store) -> dict:
     at_target = store.flag("optimize:at-target") == main
 
     # the phase, as the loops see it
-    open_items = [b for b in backlog if b["status"] in ("open", "running")]
+    spec_open = cfg.specify.enabled and not store.flag("spec:approved")
+    open_items = [b for b in backlog if b["status"] in ("open", "running") and b["loop"] == "implement"]
     if converged:
         phase = "done"
+    elif spec_open:
+        phase = "specify"
     elif rounds and rounds[-1]["status"] != "done":
         phase = "audit"
     elif cfg.implement.enabled and open_items:
@@ -86,7 +91,8 @@ def state(cfg, store: Store) -> dict:
         phase = "audit"
     else:
         phase = "idle"
-    phases = [p for p, on in (("implement", cfg.implement.enabled), ("optimize", cfg.optimize.enabled),
+    phases = [p for p, on in (("specify", cfg.specify.enabled), ("implement", cfg.implement.enabled),
+                              ("optimize", cfg.optimize.enabled),
                               ("audit", cfg.audit.enabled)) if on] + ["done"]
 
     # the benchmark over time: experiments, plus the measurements of main logged at the target check
@@ -132,7 +138,8 @@ def state(cfg, store: Store) -> dict:
     first = store.q("SELECT MIN(started) t FROM runs")[0]["t"]
 
     return dict(
-        project=cfg.project.name, language=cfg.project.language, main=(main or "")[:10], now=now,
+        project=cfg.project.name, language=cfg.project.language,
+        github=cfg.project.github if cfg.project.visibility == "public" else None, main=(main or "")[:10], now=now,
         started=first, phase=phase, phases=phases,
         decisions=[dict(question=d["question"]) for d in store.q("SELECT question FROM decisions WHERE answer IS NULL")],
         paused=[r["key"].split(":", 1)[1] for r in store.q("SELECT key FROM flags WHERE key LIKE 'paused:%' AND value = '1'")],
