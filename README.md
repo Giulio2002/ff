@@ -1,251 +1,356 @@
-# formal-factory
+# formal-factory — manual
 
-A software factory for **formal programs**: code that comes with machine-checked proofs that it
-does what a frozen specification says, for every input. Agents produce code and proofs, a proof
-checker keeps score, and a deterministic gate decides what reaches `main`. You talk to one
-coordinator agent; everything else runs in the background.
-
-It is the machinery described in
-[Creating a "formal programs" factory and making a formal program of SSZ with it](https://x.com/GiulioRebuffo/status/2106866465622356201),
-as a reusable Python package, for **Bend 2** or **Lean 4** targets.
+formal-factory (`ff`) runs AI agents that write a program **and its machine-checked proofs**
+against a specification you freeze. A proof checker keeps score and a deterministic gate decides
+what reaches `main`. Targets are written in **Bend 2** or **Lean 4**. The run goes through three
+phases by itself, without waiting for you:
 
 ```
-            questions and decisions                     git push            green
-   me  <---------------------------->  coordinator  ...........>  gate  -----------> main
-                                        |      ^                    ^ red: back to the agent
-                                 briefs |      | reports            |
-                                        v      |                    |
-        +--------------------------------------------------------------------------+
-        |  implementers   optimizer   auditors (fresh each round)   judge   fixers  |
-        |   (each worker may start, steer and wait for its own subagents)          |
-        +--------------------------------------------------------------------------+
+implement  ──(backlog empty)──▶  optimize  ──(benchmark.target met)──▶  audit  ──(converged)──▶  done
 ```
 
-## The loops
+You watch it, talk to it through a coordinator chat or the HTTP API, and steer it when you want.
 
-**Implement.** Pick an open item (a missing law, an unimplemented type) from your backlog
-command, change the code and its proofs, check, and make sure no frozen statement moved.
-How agents change the program is your choice, `project.workflow`: `direct` (they edit code
-and proofs) or `generators` (bend-ssz style: they edit generator scripts, `commands.regenerate`
-writes the `generated` files, and the gate rejects any hand edit). Then the gate. A red gate goes back to the same agent with the gate's log.
+---
 
-**Optimize** (autoresearch with a veto). One change, benchmarked on one number. It's kept
-only if the number improves by `min_improvement_pct` *and* every proof, unit test and
-vector still passes; otherwise it's reverted. The history of experiments goes into the
-next optimizer's prompt.
-With `benchmark.target` set, the loop stops experimenting once main meets the target (it
-re-measures whenever main moves, and resumes if main falls short again).
+## 1. Install
 
-The phases follow each other by themselves: the audit starts once the implement backlog is empty
-and (with a `benchmark.target`) the target is met on main (`loops.audit.after` overrides this; `[]`
-audits at once). The audit then runs rounds until one finds nothing reachable at
-`loops.audit.converge_at` (default `high`) or worse, and stops. No human answer is needed at any
-step; `confirm_each_round: true` asks before each further round.
+```sh
+git clone git@github.com:Giulio2002/formal-factory.git && cd formal-factory
+python3 -m venv .venv && . .venv/bin/activate
+pip install -e .                 # Python 3.11+
+```
 
-The optimizer learns from the **fastest baseline**: `benchmark.references` names the reference
-implementations the benchmark compares against (a local path or a git repository, its key files,
-and notes on what makes it fast). The factory keeps a read-only copy (`ff references`) and every
-optimizer prompt starts from it: study how the reference gets its speed, then port the idea through
-the generators, proved. Any role's prompt can use the same `{references}` block.
+You also need:
 
-The optimizer may change any code and any proof that is not frozen (helper laws included); frozen
-statements stay as they are.
+- the checker: a Bend 2 binary (`bend`) or a Lean 4 toolchain (`lake`);
+- at least one agent CLI: Claude Code (`claude`) or Codex (`codex`), logged in;
+- git.
 
-**Audit.** Each round gets *fresh* auditors that have never seen the code, in three flavors:
-- **mutation:** plant plausible mistakes and see whether a proof complains;
-- **crash:** hostile input through the public API;
-- **regression:** what did the last fixes quietly weaken?
+Running as root? Claude Code refuses `bypassPermissions` as root unless it is told it is in a
+sandbox. Add `IS_SANDBOX: "1"` to the provider's `env` (see §3).
 
-A **judge** asks one question per finding: can a real caller reach this through the public
-API? If yes, a **fixer** adds a law or fixes the code (through the gate). If not, the
-finding is documented in `KNOWN_LIMITATIONS.md`. The round ends by re-stamping
-`EVIDENCE.md` through the gate. Then the factory asks you whether to run one more round,
-or stops when critical findings reach zero.
+## 2. Prepare the target repository
 
-## The gate
+The factory works on a git repository (the *target*). Before starting, it should contain what only
+a human should write:
 
-Deterministic Python, not an agent, so it can't be talked into a shortcut. For each
-candidate branch:
-
-1. The candidate must contain the current `main`. Stale candidates are rebased and
-   resubmitted automatically; real conflicts go back to the agent.
-2. Cold: a fresh clone, no caches.
-3. The lock file is untouched. Only the gate writes it, and it is always read from `main`.
-4. With `workflow: generators`: regenerate everything. The tree must be byte-identical to
-   what was committed, so nobody hand-edits generated files.
-5. Frozen statements are unchanged, or the change is recorded in `frozen_changes.yaml`
-   with a reason **and the name of a proof that the new statement implies the old**. That
-   proof is checked like everything else.
-6. Nothing forbidden appears. Every file checks, each within its time budget. Plus
-   language extras:
-   - Bend: optional `--verdict` kernel recheck.
-   - Lean: `#print axioms` on every frozen theorem, against an allowlist, so a hidden
-     `sorry` fails.
-7. Unit tests, test vectors and runtime tests pass.
-8. Green: new statements are added to the lock, and `main` moves to exactly that tree
-   (compare-and-swap); it's pushed if a remote is configured. A remote build server is
-   supported (`gate.host: user@host` runs `ff gate-run` there), but not yet tested.
-
-Agents run the same checks in their worktree with `ff check`.
-
-### Frozen statements
-
-What counts as a statement depends on the language:
-- **Bend:** every top-level `law` block. In frozen spec files, also every `def`/`type`.
-- **Lean:** every `theorem`/`lemma` up to its `:=`, so proofs may change but statements
-  may not. Every other declaration is frozen in full.
-
-`ff freeze --yes` is the human step that locks the initial spec on `main`. After that, only
-the gate writes the lock.
-
-## Agents: Claude, GPT, GLM
-
-Every role picks a provider in `factory.yaml`:
-
-| Provider kind | Launched as | Steering |
+| What | Example (Bend) | Why |
 |---|---|---|
-| `claude` (Claude Code) | `claude -p --input-format stream-json --output-format stream-json` | messages are written into the live session as new user turns |
-| `codex` (GPT via Codex) | `codex exec --json` | `ff inbox` during the run; what is left is delivered by `codex exec resume <session>` |
-| GLM | `kind: claude` with `ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_MODEL` env vars (an Anthropic-compatible endpoint) | as Claude |
-| `script` | any command | `ff inbox` |
+| The specification | `spec/*.bend` | what the program must do; frozen |
+| The contract | `proofs/contract.bend`: the laws that must be proved | what "done" means; frozen |
+| A backlog command | `tools/backlog.py`: prints one open item per line (`<id>\t<description>`) | the implement loop's work list (keep it fast: it runs on every change of main) |
+| Tests | unit tests, official test vectors, runtime tests of the compiled library | run by the gate on every candidate |
+| A benchmark (optional) | `tools/bench.py`: prints one number | what the optimize loop chases |
 
-Loop agents run in processes of their own, and each run records its cycle (task, attempt,
-backlog item, baseline). Restarting the daemon (new code, new settings) does not kill them: the
-next daemon adopts every run still going and carries its cycle on (commit, gate, retry); only runs
-whose process is gone are stopped and their items reopened.
+Give the factory **its own clone** of the target (`project.repo`). Agents never touch its checkout;
+only the gate moves `main` there.
 
-Each run gets:
-- its own git worktree and branch;
-- a run directory with the prompt, the raw transcript and the result;
-- token and cost accounting (`ff bill`);
-- a timeout, and a stop flag that any process can set.
+## 3. Write `factory.yaml`
 
-### Subagents
+```sh
+ff init --language bend          # or lean: writes an annotated factory.yaml to edit
+ff validate                      # loads it and reports mistakes
+```
 
-Codex has no native subagents, and a subagent may want a *different* model than its parent
-(a Claude fixer asking a GLM attacker), so the factory provides subagents itself. A role
-lists the roles it may use:
+One file holds everything. The sections, in the order you will need them:
 
 ```yaml
-roles:
-  fixer:
-    provider: claude
-    subagents: [explorer, prover, attacker]
+project:
+  name: modexp
+  repo: ./bend-modexp            # the factory's clone (relative to this file)
+  language: bend                 # bend | lean
+  workflow: direct               # direct: agents edit code and proofs | generators: they edit generators
+  # remote: origin               # push main after every green gate
+  # state_dir: ~/.formal-factory/modexp   (default)
+
+commands:                        # run by the gate, in a cold clone, in this order
+  unit_tests: python3 tools/check_contract.py
+  vectors: cd tools && python3 run_vectors.py
+  runtime_tests: tools/geth_tests.sh
+  # regenerate: python3 tools/generate_all.py   (workflow: generators only)
+
+checker:
+  bend:
+    binary: /path/to/bend
+    args: ["--check-only"]
+    files: ["proofs/**/*.bend"]
+    file_timeout_seconds: 60     # every file must check within this budget
+    kernel_recheck: true         # also `bend --verdict` (the formal kernel) in the gate
+
+spec:
+  frozen: ["spec/*.bend", "proofs/contract.bend", "proofs/laws.bend"]
+
+benchmark:                       # only for the optimize loop
+  command: cd tools && python3 bench.py
+  metric: '"ratio": ([0-9.]+)'   # regex; group 1 is the number
+  direction: lower
+  min_improvement_pct: 3         # a change must beat main by this much to be kept
+  target: 3.0                    # the goal: optimizing stops once main meets it
+  references:                    # the fastest baseline, for the optimizer to learn from
+    - name: geth-modexp
+      path: ~/go/pkg/mod/github.com/ethereum/go-ethereum@v1.17.7
+      paths: ["core/vm/contracts.go"]
+      notes: windowed Montgomery; CRT for even moduli
+
+providers:                       # how agents are launched (see §8)
+  claude:
+    kind: claude
+    model: claude-opus-5-5
+    env: {IS_SANDBOX: "1"}       # only when running as root
+
+roles:                           # every agent role: provider, timeout, subagents, prompt
+  coordinator: {provider: claude}
+  implementer: {provider: claude, timeout_minutes: 180, subagents: [explorer]}
+  optimizer:   {provider: claude, timeout_minutes: 120}
+  auditor_mutation:   {provider: claude}
+  auditor_crash:      {provider: claude}
+  auditor_regression: {provider: claude}
+  judge:  {provider: claude}
+  fixer:  {provider: claude}
+  explorer: {provider: claude, subagent_only: true}
+
+loops:
+  implement: {enabled: true, workers: 2, max_attempts: 4, backlog_command: python3 tools/backlog.py}
+  optimize:  {enabled: true, workers: 1}
+  audit:
+    enabled: true
+    flavors: {mutation: auditor_mutation, crash: auditor_crash, regression: auditor_regression}
+    fixers: 2
+    converge_at: high            # stop once a round finds nothing reachable at high or worse
+    max_rounds: 10
+
+limits:
+  max_parallel_agents: 4
+  nice: 19                       # checker, tests and benchmarks run at low priority
 ```
 
-Inside its run, the worker uses:
+Notes:
+- `${VAR}` and `${VAR:-default}` are read from the environment, so keys stay out of the file.
+- A role without `prompt:` uses the built-in one in `ff/roles/<role>.md`. `prompt:` can be inline text
+  or a file path.
+- `examples/factory.bend.yaml` and `examples/factory.lean.yaml` show every option with comments.
+- The daemon re-reads `factory.yaml` when it changes. Commands, budgets, models, prompts and timeouts
+  apply to the next run and gate. Worker counts need a restart.
 
-```
-ff subagent start attacker "try to break the fix in src/decode.bend"   # -> run id
-ff subagent steer <id> "focus on the length prefix"
-ff subagent wait <id>        # or: ff subagent run <role> "<task>" (start + wait)
-ff subagent status | stop <id>
-```
-
-Subagents run in the parent's worktree (or `--own-worktree`), on their own provider. They're
-depth-limited (`max_subagent_depth`) and can be steered by their parent or through the API.
-
-## Rotating subscriptions
-
-Keep several Claude and Codex subscriptions in one pool, `~/.formal-agents/`, shared by every factory
-on the machine:
+## 4. Freeze the specification
 
 ```sh
-ff add_login claude              # runs `claude auth login` in its own CLAUDE_CONFIG_DIR -> account claude-1
-ff add_login claude work-max     # named
-ff add_login codex -- --device-auth   # `codex login --device-auth` in its own CODEX_HOME (headless servers)
-ff logins [--check]              # who is logged in, cooling down, runs, limit hits, spend
-ff relogin <name> | ff remove_login <name> [--delete]
-ff account <name> disable|enable|cooldown 2h|clear
+ff freeze --yes
 ```
 
-Each account is a separate config directory (`~/.formal-agents/claude/<name>`, `.../codex/<name>`),
-so the CLIs keep their own credentials and sessions apart. Every Claude Code or Codex agent takes an
-account from the pool:
+This locks every frozen statement (`spec.frozen`) on `main`, in `frozen.lock.json`. After this, only
+the gate writes the lock. If you, the human, change the spec later, re-freeze with
+`ff freeze --yes --force`.
 
-- `round_robin` (default): the least recently used account, so work spreads over every subscription;
-  `fill_first`: one subscription until it runs out, then the next, around the list.
-- When the CLI reports that the account is out of credits, the account cools down until the reset
-  time the message names (or `default_cooldown_minutes`). The agent's session file is copied to the
-  next account and resumed there (`claude --resume`, `codex exec resume`), so the agent keeps its
-  context and carries on. If every account is cooling down, the run waits for the first one back
-  and the coordinator sees an `accounts-exhausted` event.
-- `providers.<name>.accounts`: `auto` (default; the pool when it has accounts of that kind), `none`
-  (the CLI's own login), or a list of names. A provider that brings its own credentials in `env`
-  (GLM's `ANTHROPIC_AUTH_TOKEN`) never uses the pool.
+## 5. Run it
 
-`ff status`, `ff runs` (the `account` column) and `GET /accounts` show which subscription did what.
-
-## The steering API
-
-`ff run --api 127.0.0.1:8787` (or `ff serve`) starts the HTTP API. Every request needs
-`Authorization: Bearer $FF_API_TOKEN` (a random token is printed if it's unset).
-
-```
-POST /agents                {"role": "fixer", "task": "..."}          -> {"run_id"}
-POST /runs/<id>/steer       {"message": "...", "cascade": false}     the agent, or the agent and all its live subagents
-POST /runs/<id>/stop        {"cascade": true}
-GET  /runs/<id>             result, usage, children, messages, transcript tail
-GET  /runs/<id>/tree        the run and its descendants
-GET  /status | /events?since= | /runs?status=running | /findings | /decisions
-POST /briefs {"loop","text"} | /decisions/<id> {"answer"} | /loops/<loop>/pause|resume
-```
-
-So you steer one agent, and that agent steers its subagents with `ff subagent steer`, or
-you cascade the message to all of them.
-
-## The coordinator
-
-`ff chat` opens the coordinator role as an interactive session in the factory's state
-directory. Its tools are the `ff` commands:
-- `ff status`
-- `ff events --since 10h`
-- `ff runs`, `ff show`, `ff tail`
-- `ff findings`, `ff gates`, `ff experiments`, `ff bill`
-- `ff steer`, `ff brief`, `ff pause`/`ff resume`, `ff decide`
-
-Ask it "what did we fix in the last 10 hours?" or "why is fixer A taking so long?".
-
-## Configuration
-
-One file configures everything: the target repo and language, the checker, the commands
-(regenerate, unit tests, vectors, runtime tests), the frozen globs, the benchmark, the gate,
-the providers, every role (provider, model, prompt, timeout, subagents, env, args), the
-loops and the limits. See `examples/factory.bend.yaml` and `examples/factory.lean.yaml`.
-`ff init --language lean` copies one; `ff validate` checks it.
-
-Role prompts default to the built-in ones in `ff/roles/*.md`. Any role can override its
-prompt inline or with a file. `${VAR}` in the YAML is read from the environment, so API keys
-stay out of the file.
-
-## Running it
+Run the daemon in tmux (or nohup), so it outlives your shell:
 
 ```sh
-pip install -e .            # Python 3.11+, pyyaml
-ff init --language bend     # then edit factory.yaml
-ff validate
-ff freeze --yes             # lock the human-written spec on main
-ff run --api 127.0.0.1:8787 # the loops, in the background (nohup/tmux)
-ff chat                     # talk to the coordinator
+export FF_CONFIG=$PWD/factory.yaml        # or pass --config to every command
+export FF_API_TOKEN=$(openssl rand -hex 16)
+tmux new -d -s ff 'ff run --api 127.0.0.1:8787 2>&1 | tee -a factory.log'
 ```
 
-`project.repo` should be the factory's own clone of the target. Agents never touch its
-checkout; only the gate moves `main` there (and pushes it).
+`ff run --loops implement,optimize,audit` limits which loops run. Without `--loops`, every loop
+enabled in the YAML runs.
 
-## Tests
+Then follow it:
+
+```sh
+ff chat           # the coordinator: an open chat (Claude Code) with the factory's stage at the bottom
+ff status         # one screen: main, spend, running agents, last gate, backlog, audit round, decisions
+ff watch          # stream the important events as they happen
+```
+
+**Stopping and restarting is safe.** `Ctrl-C` (or `kill <pid>`) stops the daemon at once. Agents run
+in processes of their own and keep going. The next `ff run` adopts them and continues where they
+were: committing, rebasing, gating. That includes an audit round in the middle of its fixes. Restart
+whenever you update ff or change worker counts.
+
+## 6. What happens while it runs
+
+**Implement.** Each worker takes an open item from the backlog command, gives it to an implementer
+agent in its own git worktree and branch, and sends the result to the gate. A red gate goes back to
+the same agent with the gate's log, up to `max_attempts`. Then the item is `blocked`
+(`ff backlog reopen <item>` puts it back). The backlog is listed again whenever `main` moves.
+
+**Optimize.** Autoresearch with a veto. Each optimizer makes one change. The change is kept only if
+the benchmark beats `main` by `min_improvement_pct` (median of `repeats` runs) **and** the gate is
+green. Otherwise it is reverted. Each optimizer sees the history of experiments and the reference
+implementations (`ff references`), and is told to learn from the fastest one. Once `main` meets
+`benchmark.target`, optimizing stops. It resumes by itself if a later change pushes `main` back over
+the target.
+
+**Audit.** Each round works like this:
+1. Fresh auditors (mutation, crash, regression) look for problems.
+2. A judge decides, for each finding, whether a real caller can reach it. The judge also groups
+   duplicates.
+3. Fixers fix the reachable ones through the gate.
+4. Unreachable findings go to `KNOWN_LIMITATIONS.md`, and the round is stamped in `EVIDENCE.md`.
+
+The audit stops by itself after a round that finds nothing reachable at `converge_at` (default `high`)
+or worse. Set `confirm_each_round: true` if you want to be asked before each further round.
+
+**Phases.** The audit starts once the implement backlog is empty and the benchmark target is met.
+Set `loops.audit.after` to change that; `[]` audits at once. The run is finished when `ff status`
+shows the audit converged (`ff events` prints `audit-done`).
+
+## 7. Steering
+
+You rarely have to, but you can:
+
+```sh
+ff steer <run-id> "focus on the length prefix"     # message a running agent (it reads it at once)
+ff steer <run-id> "..." --cascade                  # ... and every subagent it started
+ff brief implement "prefer small commits"          # guidance for the next agents of a loop (or: all)
+ff stop <run-id>                                   # stop an agent and its subagents
+ff pause optimize | ff resume all                  # pause or resume loops
+ff decide <id> yes                                 # answer a decision, if one is open
+ff agent start fixer "make X faster"               # an ad-hoc agent outside the loops
+```
+
+The coordinator (`ff chat`) can do all of this for you. Ask it "what did we fix in the last 10
+hours?", "why is the fixer taking so long?", or "tell the optimizer to try CRT".
+
+## 8. The steering API
+
+`ff run --api 127.0.0.1:8787` (or `ff serve` for the API alone). Every request needs
+`Authorization: Bearer $FF_API_TOKEN`. If the variable is unset, a random token is printed at
+start. Responses are JSON.
+
+**Reading state**
+
+| Request | Returns |
+|---|---|
+| `GET /status` | project, main, spend, running agents, last gate, backlog, audit round, open decisions, accounts, optimize target |
+| `GET /events?since=<unix>&loop=<l>&limit=N` | the event log |
+| `GET /runs?status=running` | runs: id, role, loop, parent, status, summary |
+| `GET /runs/<id>` | one run: result, usage/cost, children, messages sent to it, transcript tail |
+| `GET /runs/<id>/tree` | the run and all its subagents |
+| `GET /findings` | audit findings: round, flavor, severity, status |
+| `GET /decisions` | open questions for a human |
+| `GET /accounts` | the subscription pool: ready or cooling down, runs, limit hits |
+
+**Acting**
+
+| Request | Body | Effect |
+|---|---|---|
+| `POST /agents` | `{"role", "task", "parent"?}` | start an agent in its own worktree; returns `{"run_id"}` |
+| `POST /runs/<id>/steer` | `{"message", "cascade"?: false}` | message a running agent, or it and all its live subagents |
+| `POST /runs/<id>/stop` | `{"cascade"?: true}` | stop it (and its subagents) |
+| `POST /briefs` | `{"loop", "text"}` | guidance for the next agents of a loop |
+| `POST /decisions/<id>` | `{"answer"}` | answer a decision |
+| `POST /loops/<name>/pause` or `/resume` | | `name` may be `all` |
+
+```sh
+curl -s -H "Authorization: Bearer $FF_API_TOKEN" localhost:8787/status
+curl -s -H "Authorization: Bearer $FF_API_TOKEN" -X POST localhost:8787/runs/<id>/steer \
+     -d '{"message": "focus on the length prefix", "cascade": true}'
+```
+
+The intended pattern is that you steer one agent, and that agent steers its own subagents
+(`ff subagent steer`). Or you pass `cascade` to reach all of them.
+
+## 9. Agents, models and subscriptions
+
+**Providers.** Every role names a provider:
+
+| `kind` | Launched as | Use it for |
+|---|---|---|
+| `claude` | Claude Code, `claude -p` (stream-json) | Claude models |
+| `codex` | Codex, `codex exec --json` | GPT models |
+| `claude` + `env` | Claude Code pointed at an Anthropic-compatible endpoint (`ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_MODEL`) | GLM and similar |
+| `script` | any command | tests, other CLIs |
+
+**Subagents.** A role lists the roles it may start, and its agents use them from inside their run:
+
+```
+ff subagent start explorer "where is the length prefix parsed?"   # -> run id
+ff subagent steer <id> "..." | ff subagent wait <id> | ff subagent run <role> "<task>"
+```
+
+**Rotating subscriptions.** Several Claude or Codex logins can share the work. When one runs out of
+credits, the agent's session moves to the next login and carries on:
+
+```sh
+ff add_login claude                # logs in a new account into ~/.formal-agents/claude/claude-1
+ff add_login codex -- --device-auth
+ff logins --check                  # who is ready, cooling down, how much each has run
+ff account claude-1 disable|enable|cooldown 2h
+```
+
+`accounts.strategy` is `round_robin` (spread the work, the default) or `fill_first` (use one login
+until it runs out).
+
+## 10. The gate: what gets rejected
+
+Every candidate goes through the same deterministic checks, in a fresh clone. Agents run the same
+checks with `ff check` before they submit.
+
+1. It must contain the current `main`. The gate rebases stale candidates itself; only a real conflict
+   goes back to the agent.
+2. `frozen.lock.json` is untouched. Only the gate writes it.
+3. `workflow: generators`: regenerating must reproduce exactly the committed files.
+4. Frozen statements are unchanged. A change must be recorded in `frozen_changes.yaml` with a reason
+   and the name of a proof that the new statement implies the old one.
+5. Every checked file passes within `file_timeout_seconds`, with nothing from `forbid`. Bend adds the
+   `--verdict` kernel recheck; Lean adds an axiom audit (no hidden `sorry`).
+6. `unit_tests`, `vectors` and `runtime_tests` pass.
+7. Green: `main` moves to exactly that tree, and new statements are locked.
+
+## 11. Where things are
+
+Everything about a run lives in `project.state_dir` (default `~/.formal-factory/<name>`):
+
+| Path | Content |
+|---|---|
+| `factory.db` | the store: runs, events, backlog, gates, experiments, findings, decisions |
+| `runs/<run-id>/` | `prompt.md`, `transcript.jsonl`, `result.json` of each agent |
+| `gate/gate-<n>.log` | each gate's full log |
+| `worktrees/` | the agents' working copies |
+| `references/` | read-only copies of the benchmark's reference implementations |
+
+Commands for reading it: `ff runs`, `ff show <id>`, `ff tail -f <id>`, `ff events --since 2h`,
+`ff gates`, `ff experiments`, `ff findings`, `ff bill` (tokens and cost per role and model).
+
+## 12. Troubleshooting
+
+| Symptom | Cause and fix |
+|---|---|
+| Agents fail at once with "cannot be used with root" | Add `IS_SANDBOX: "1"` to the provider's `env`. The loop pauses after a launch failure; `ff resume <loop>`. |
+| `backlog command timed out` | The backlog command is too slow. It should list open items in seconds; leave heavy checks to the gate. |
+| A proof file fails "over budget" | It checks, but too slowly for `file_timeout_seconds`. The agent gets the gate log and must split or speed up the proof. |
+| An agent seems stuck | `ff tail -f <id>` shows what it is doing. `ff steer <id> "..."` tells it something; `ff stop <id>` ends it, and the loop retries. |
+| An item keeps failing | After `max_attempts` it is `blocked`. Read `ff show <run-id>`, then `ff brief implement "..."` and `ff backlog reopen <item>`. |
+| Out of credits | `ff logins` shows cooldowns. Add another login with `ff add_login`; waiting runs pick it up. |
+| You changed ff itself | Restart the daemon. Running agents are adopted, not lost. |
+
+## 13. Command reference
+
+| Command | Does |
+|---|---|
+| `ff init [--language bend\|lean]` / `ff validate` | write / check `factory.yaml` |
+| `ff freeze --yes [--force]` | lock the frozen statements on main |
+| `ff run [--loops ...] [--api host:port]` / `ff serve` | the daemon / the API alone |
+| `ff chat` | the coordinator chat |
+| `ff status [--json]`, `ff watch`, `ff events`, `ff digest` | where things are |
+| `ff runs`, `ff show`, `ff tail [-f]` | agents and their transcripts |
+| `ff steer [--cascade]`, `ff stop`, `ff brief`, `ff pause`, `ff resume`, `ff decide` | steering |
+| `ff backlog [reopen <item\|all>]`, `ff gates`, `ff experiments`, `ff findings`, `ff bill`, `ff references` | per-loop details |
+| `ff check`, `ff gate <branch>` | the gate's checks here / gate a branch now |
+| `ff agent start\|wait` | ad-hoc agents |
+| `ff add_login`, `ff logins`, `ff relogin`, `ff remove_login`, `ff account` | subscriptions |
+| `ff subagent ...`, `ff inbox`, `ff note` | used by agents from inside their run |
+
+## 14. Developing ff
 
 ```sh
 pip install -e '.[test]'
 FF_TEST_BEND=/path/to/bend pytest -q
 ```
 
-The end-to-end tests run a toy Bend project with a deterministic fake agent (`tests/fake_agent.py`)
-and cover:
-- the gate refuses a weakened frozen law and a hand-edited generated file, and accepts the
-  generator fix;
-- a full audit round: fresh auditors, then the judge, then parallel fixers (including a
-  rebase conflict), then evidence and known limitations merged through the gate, with the
-  new laws locked;
-- the API steering an agent that relays the message to its own subagent.
-
-The real Claude Code and Codex paths were also checked by hand, each steered mid-run.
+The tests drive a toy Bend project with deterministic fake agents (`tests/fake_agent.py`,
+`tests/fake_claude.py`). They cover the gate, every loop, adoption after restarts, steering,
+subscription rotation and the phase hand-offs.
