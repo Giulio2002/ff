@@ -952,3 +952,23 @@ def test_the_gate_refuses_changes_to_the_harness(tmp_path):
     f.ws.commit_pending(wt, "a faster benchmark")
     v = f.gate.submit(br)
     assert not v.ok and v.stage == "immutable" and "tools/bench.py" in v.log
+
+
+def test_optimize_waits_for_the_implementation(tmp_path):
+    repo = make_project(tmp_path, bug=False)
+    p = write_config(tmp_path, repo)
+    import yaml
+    c = yaml.safe_load(p.read_text())
+    c["benchmark"] = {"command": "echo 9", "target": 3, "repeats": 1}
+    c["roles"]["optimizer"] = {"provider": "fake"}
+    c["loops"] = {"implement": {"enabled": True, "backlog_command": "printf 'law:x\\n'"}, "optimize": {"enabled": True}}
+    p.write_text(yaml.safe_dump(c))
+    f = Factory.from_path(p)
+    from ff.loops import ImplementLoop, OptimizeLoop
+    ImplementLoop(f).refresh_backlog()
+    opt = OptimizeLoop(f)
+    opt.stop.wait = lambda t=None: False
+    opt.worker(0)
+    assert not f.store.q("SELECT 1 FROM runs"), "no benchmark, no optimizer while items are open"
+    assert any(e["kind"] == "waiting" and "implement" in e["message"] for e in f.store.events())
+    assert f.store.flag("baseline:" + git(repo, "rev-parse", "main")) is None

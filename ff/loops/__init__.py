@@ -425,6 +425,22 @@ class OptimizeLoop(Loop):
     def worker(self, i: int):
         if not self.wait_unpaused():
             return False
+        # the phases follow each other: nothing to make fast before it is specified and implemented
+        waiting = []
+        if self.cfg.specify.enabled and not self.store.flag("spec:approved"):
+            waiting.append("specify (the specification is not approved yet)")
+        if self.cfg.implement.enabled and self.store.q(
+                "SELECT 1 FROM backlog WHERE status IN ('open', 'running', 'blocked') AND loop = 'implement' "
+                "AND NOT item LIKE 'brief: %' LIMIT 1"):
+            waiting.append("implement (open backlog items)")
+        if waiting:
+            w = "; ".join(waiting)
+            if self.store.flag("optimize:waiting") != w:
+                self.store.set_flag("optimize:waiting", w)
+                self.log("waiting", f"optimize waits for: {w}")
+            self.stop.wait(120)
+            return
+        self.store.set_flag("optimize:waiting", None)
         base = self.baseline()
         if base is None:
             self.stop.wait(600)
