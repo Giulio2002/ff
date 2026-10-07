@@ -780,3 +780,23 @@ def test_the_audit_stops_by_itself_when_a_round_finds_nothing_that_matters(tmp_p
     f.store.x("INSERT INTO findings (round, flavor, run_id, title, severity, description, reproducer, status, "
               "created) VALUES (1, 'crash', 'r', 't', 'high', 'd', 'r', 'fixed', ?)", (now,))
     assert not loop.converged(1)[0], "a reachable high finding (even fixed) means another round"
+
+
+def test_phases_follow_each_other_without_configuration(tmp_path):
+    repo = make_project(tmp_path, bug=False)
+    p = write_config(tmp_path, repo)
+    import yaml
+    from ff.config import load
+    c = yaml.safe_load(p.read_text())
+    c["benchmark"] = {"command": "echo 1", "target": 3}
+    c["roles"]["optimizer"] = {"provider": "fake"}
+    c["loops"] = {"implement": {"enabled": True, "backlog_command": "true"}, "optimize": {"enabled": True},
+                  "audit": {"enabled": True, "flavors": {"mutation": "auditor_mutation"}}}
+    p.write_text(yaml.safe_dump(c))
+    assert load(p).audit.after == ["implement", "optimize"]
+    c["benchmark"].pop("target")          # an optimize loop without a target never finishes: not waited for
+    p.write_text(yaml.safe_dump(c))
+    assert load(p).audit.after == ["implement"]
+    c["loops"]["audit"]["after"] = []     # explicit: audit at once
+    p.write_text(yaml.safe_dump(c))
+    assert load(p).audit.after == []

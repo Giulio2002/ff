@@ -34,8 +34,13 @@ only if the number improves by `min_improvement_pct` *and* every proof, unit tes
 vector still passes; otherwise it's reverted. The history of experiments goes into the
 next optimizer's prompt.
 With `benchmark.target` set, the loop stops experimenting once main meets the target (it
-re-measures whenever main moves, and resumes if main falls short again), and an audit loop with
-`after: [implement, optimize]` starts by itself once the backlog is empty and the target is met.
+re-measures whenever main moves, and resumes if main falls short again).
+
+The phases follow each other by themselves: the audit starts once the implement backlog is empty
+and (with a `benchmark.target`) the target is met on main (`loops.audit.after` overrides this; `[]`
+audits at once). The audit then runs rounds until one finds nothing reachable at
+`loops.audit.converge_at` (default `high`) or worse, and stops. No human answer is needed at any
+step; `confirm_each_round: true` asks before each further round.
 
 The optimizer learns from the **fastest baseline**: `benchmark.references` names the reference
 implementations the benchmark compares against (a local path or a git repository, its key files,

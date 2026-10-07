@@ -163,7 +163,7 @@ loops:
     fixer: fixer
     fixers: 3
     max_rounds: 8
-    # after: [implement, optimize]  # start once the backlog is empty and benchmark.target is met (optional)
+    # after: [implement, optimize]  # default: every enabled loop that can finish; [] = audit at once
     converge_at: high              # stop once a round finds nothing reachable at high or worse
     confirm_each_round: false      # true: also ask before each further round
     known_limitations_file: KNOWN_LIMITATIONS.md

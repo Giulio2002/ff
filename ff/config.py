@@ -177,8 +177,10 @@ class AuditLoop:
     fixer: str = "fixer"
     fixers: int = 2
     max_rounds: int = 10
-    after: list[str] = field(default_factory=list)   # start once these loops are finished: implement (backlog
-                                                     # empty) and/or optimize (benchmark.target met on main)
+    # start once these loops are finished: implement (backlog empty) and/or optimize (benchmark.target
+    # met on main). Unset: the phases follow each other by themselves, so the audit waits for every
+    # enabled loop that can finish (optimize only finishes when benchmark.target is set). [] = at once.
+    after: list[str] | None = None
     # the audit stops by itself once a round finds nothing reachable at `converge_at` or worse
     # (critical | high | medium | low): the auditors have run out of findings that matter
     converge_at: str = "high"
@@ -363,6 +365,9 @@ def load(path: str | os.PathLike) -> Config:
         used += list(audit.flavors.values()) + [audit.judge, audit.fixer]
     if audit.converge_at not in ("critical", "high", "medium", "low"):
         raise ConfigError(f"loops.audit.converge_at: '{audit.converge_at}' (critical, high, medium or low)")
+    if audit.after is None:
+        audit.after = ([n for n, l in (("implement", implement), ("optimize", optimize)) if l.enabled
+                        and (n != "optimize" or benchmark.target is not None)])
     for dep in audit.after:
         if dep not in ("implement", "optimize"):
             raise ConfigError(f"loops.audit.after: unknown loop '{dep}' (implement, optimize)")
