@@ -324,6 +324,7 @@ def test_backlog_ids_survive_a_reworded_description(tmp_path):
     loop = ImplementLoop(f)
     assert loop.take() == "law:gas"
     out.write_text("law:gas\tprove gas (new wording)\nlaw:run\tprove run\n")
+    f.store.set_flag("backlog:main", None)      # (the listing changed without main moving)
     assert loop.take() == "law:run", "the reworded item is the same item, still running"
     rows = {r["item"]: (r["status"], r["note"]) for r in f.store.q("SELECT * FROM backlog")}
     assert rows["law:gas"] == ("running", "prove gas (new wording)")
@@ -712,3 +713,21 @@ def test_a_restart_adopts_a_cycle_whose_agent_is_done_but_not_gated(tmp_path, mo
     assert f2.store.q("SELECT status FROM backlog WHERE item = ?", (item,))[0]["status"] == "done"
     assert "Nat.add(a,b)" in git(repo, "show", "main:src/add.bend")
     assert not f2.store.q("SELECT 1 FROM flags WHERE key LIKE 'cycle-open:%' AND value = '1'")
+
+
+def test_the_backlog_is_listed_again_only_when_main_moves(tmp_path):
+    repo = make_project(tmp_path, bug=False)
+    count = tmp_path / "count"
+    p = write_config(tmp_path, repo, implement={"enabled": True,
+                                                "backlog_command": f"echo x >> {count}; printf 'item one\\n'"})
+    f = Factory.from_path(p)
+    from ff.loops import ImplementLoop
+    loop = ImplementLoop(f)
+    for _ in range(3):
+        loop.refresh_backlog()
+    assert count.read_text().count("x") == 1, "an unchanged main is not listed again"
+    (repo / "NOTE.txt").write_text("x")
+    git(repo, "add", "-A")
+    git(repo, "-c", "user.name=t", "-c", "user.email=t@x", "commit", "-q", "-m", "move main")
+    loop.refresh_backlog()
+    assert count.read_text().count("x") == 2

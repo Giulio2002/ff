@@ -194,11 +194,23 @@ class ImplementLoop(Loop):
         cmd = self.cfg.implement.backlog_command
         if not cmd:
             return
-        with self.f.main_view("backlog") as view:
-            code, out, _, _ = run_cmd(cmd, view, 1800)
-        if code != 0:
-            self.log("error", f"backlog command failed: {out[-500:]}")
+        # the backlog is a function of main: list it again only when main moved (a failed listing is
+        # retried after 30 minutes). It can be expensive (it may run the checker over every file).
+        import hashlib
+        main = sha(self.cfg.project.repo, self.cfg.project.main_branch) + ":" + hashlib.sha1(cmd.encode()).hexdigest()[:8]
+        last = self.store.flag("backlog:main") or ""
+        if last == main or (last == "failed:" + main
+                            and time.time() - float(self.store.flag("backlog:failed-at") or 0) < 1800):
             return
+        with self.f.main_view("backlog") as view:
+            code, out, secs, timed_out = run_cmd(cmd, view, 1800, self.cfg.limits.nice)
+        if code != 0 or timed_out:
+            self.store.set_flag("backlog:main", "failed:" + main)
+            self.store.set_flag("backlog:failed-at", str(time.time()))
+            self.log("error", f"backlog command {'timed out after %.0fs' % secs if timed_out else 'failed'} "
+                              f"on {main[:10]} (retried when main moves, or in 30 min): {out[-500:]}")
+            return
+        self.store.set_flag("backlog:main", main)
         # Each item is "<id>\t<description>" (or an object {"id", "task"} in a JSON list); a plain
         # line is its own id. The id is the item's identity: a description may change (a reworded
         # statement) without creating a second item while the first is still being worked on.
