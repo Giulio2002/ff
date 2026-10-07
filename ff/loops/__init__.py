@@ -445,6 +445,17 @@ class AuditLoop(Loop):
         last = last[0] if last else None
         if not self.wait_unpaused():
             return False
+        if last is not None and last["status"] == "done":
+            done, why = self.converged(last["n"])
+            if done:
+                if self.store.flag("audit:converged") != str(last["n"]):
+                    self.store.set_flag("audit:converged", str(last["n"]))
+                    self.log("audit-done", f"converged after round {last['n']}: {why}")
+                    for d in self.store.q("SELECT id FROM decisions WHERE answer IS NULL AND question LIKE ?",
+                                          (f"Audit round {last['n']} is merged%",)):
+                        self.store.x("UPDATE decisions SET answer = ?, answered = ? WHERE id = ?",
+                                     ("no (decided by the factory: converged)", time.time(), d["id"]))
+                return False
         if last is not None and last["status"] == "done" and a.confirm_each_round:
             # the human's answer about another round outlives a daemon restart
             ans = self.confirm(last["n"], json.loads(last["counts"] or "{}"))
@@ -539,14 +550,23 @@ class AuditLoop(Loop):
             return False
         # 4. document the unreachable ones and restamp the evidence, through the gate as well
         counts = self.restamp(n, base)
-        crit = counts.get("reachable_critical", 0)
         self.store.x("UPDATE rounds SET ended = ?, counts = ?, status = 'done' WHERE n = ?",
                      (time.time(), json.dumps(counts), n))
         self.log("round-end", f"audit round {n}: {json.dumps(counts)}")
-        # 5. one more round? (asked at the start of the next iteration when confirm_each_round)
-        if not a.confirm_each_round and crit <= a.stop_when_critical_at_most:
-            self.log("audit-done", f"round {n} found {crit} critical reachable findings: converged")
-            return False
+        # 5. one more round? The next iteration decides: converged (stop), or ask the human when
+        # confirm_each_round, or simply run the next round.
+
+    def converged(self, n: int) -> tuple[bool, str]:
+        """Round `n` converged when it found nothing reachable at audit.converge_at or worse: the
+        auditors ran out of findings that matter. Unreachable (documented) findings do not count."""
+        worst = SEVERITIES.index(self.cfg.audit.converge_at)
+        rows = self.store.q("SELECT severity, status FROM findings WHERE round = ?", (n,))
+        hits = [r for r in rows if r["status"] != "documented" and r["severity"] in SEVERITIES
+                and SEVERITIES.index(r["severity"]) <= worst]
+        if hits:
+            return False, f"{len(hits)} reachable finding(s) at {self.cfg.audit.converge_at} or worse"
+        return True, (f"round {n}: {len(rows)} findings, none reachable at {self.cfg.audit.converge_at} "
+                      f"or worse")
 
     def confirm(self, n: int, counts: dict) -> bool | None:
         """Ask once whether to run another round after round `n`, and wait for the answer.

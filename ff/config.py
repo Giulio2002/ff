@@ -179,8 +179,11 @@ class AuditLoop:
     max_rounds: int = 10
     after: list[str] = field(default_factory=list)   # start once these loops are finished: implement (backlog
                                                      # empty) and/or optimize (benchmark.target met on main)
-    stop_when_critical_at_most: int = 0
-    confirm_each_round: bool = True   # ask the human (through the coordinator) before another round
+    # the audit stops by itself once a round finds nothing reachable at `converge_at` or worse
+    # (critical | high | medium | low): the auditors have run out of findings that matter
+    converge_at: str = "high"
+    stop_when_critical_at_most: int = 0   # deprecated (converge_at decides); kept so old configs load
+    confirm_each_round: bool = False      # also ask the human before each further round
     known_limitations_file: str = "KNOWN_LIMITATIONS.md"
     evidence_file: str = "EVIDENCE.md"
 
@@ -358,6 +361,8 @@ def load(path: str | os.PathLike) -> Config:
             raise ConfigError("loops.optimize is enabled but benchmark.command is empty")
     if audit.enabled:
         used += list(audit.flavors.values()) + [audit.judge, audit.fixer]
+    if audit.converge_at not in ("critical", "high", "medium", "low"):
+        raise ConfigError(f"loops.audit.converge_at: '{audit.converge_at}' (critical, high, medium or low)")
     for dep in audit.after:
         if dep not in ("implement", "optimize"):
             raise ConfigError(f"loops.audit.after: unknown loop '{dep}' (implement, optimize)")

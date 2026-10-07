@@ -757,3 +757,26 @@ def test_a_finished_agent_is_not_held_open_by_a_job_it_left_behind(tmp_path, mon
     alive = os.path.exists(f"/proc/{pid}") and open(f"/proc/{pid}/stat").read().split(")")[-1].split()[0] != "Z"
     assert not alive, "the leftover job is ended"
     assert any(e["kind"] == "leftover-jobs" for e in f.store.events())
+
+
+def test_the_audit_stops_by_itself_when_a_round_finds_nothing_that_matters(tmp_path):
+    repo = make_project(tmp_path, bug=False)
+    p = write_config(tmp_path, repo, audit={"enabled": True, "flavors": {"mutation": "auditor_mutation"},
+                                            "converge_at": "high"})
+    f = Factory.from_path(p)
+    from ff.loops import AuditLoop
+    loop = AuditLoop(f)
+    now = time.time()
+    f.store.x("INSERT INTO rounds (n, started, base_commit, status) VALUES (1, ?, 'x', 'done')", (now,))
+    for sev, status in (("critical", "documented"), ("medium", "fixed"), ("low", "fixed")):
+        f.store.x("INSERT INTO findings (round, flavor, run_id, title, severity, description, reproducer, status, "
+                  "created) VALUES (1, 'mutation', 'r', 't', ?, 'd', 'r', ?, ?)", (sev, status, now))
+    did = f.store.ask("Audit round 1 is merged: ... Run another round?", ["yes", "no"])   # left by an older daemon
+    assert loop.converged(1)[0], "an unreachable critical and fixed medium/low findings: converged"
+    assert loop.worker(0) is False
+    assert any(e["kind"] == "audit-done" for e in f.store.events())
+    assert f.store.answer(did).startswith("no"), "the factory answers the pending question itself"
+    assert not f.store.q("SELECT 1 FROM rounds WHERE n = 2")
+    f.store.x("INSERT INTO findings (round, flavor, run_id, title, severity, description, reproducer, status, "
+              "created) VALUES (1, 'crash', 'r', 't', 'high', 'd', 'r', 'fixed', ?)", (now,))
+    assert not loop.converged(1)[0], "a reachable high finding (even fixed) means another round"
