@@ -554,8 +554,11 @@ class AuditLoop(Loop):
         key = f"audit:confirm:{n}"
         did = self.store.flag(key)
         if did is None:
-            did = self.store.ask(f"Audit round {n} is merged ({counts.get('reachable_critical', 0)} critical "
-                                 f"reachable findings, {counts.get('fixed', 0)} fixed). Run another round?", ["yes", "no"])
+            did = self.store.ask(f"Audit round {n} is merged: {counts.get('findings', 0)} findings, "
+                                 f"{counts.get('fixed', 0)} fixed, {counts.get('documented', 0)} not reachable; "
+                                 f"{counts.get('reachable_critical', 0)} critical found this round, "
+                                 f"{counts.get('open_critical', 0)} of them still open. Run another round?",
+                                 ["yes", "no"])
             self.store.set_flag(key, str(did))
         while not self.stop.is_set():
             ans = self.store.answer(int(did))
@@ -656,6 +659,8 @@ class AuditLoop(Loop):
             reachable = r["status"] in ("fix", "fixed", "open", "duplicate", "no-change")
             if reachable and r["severity"] == "critical":
                 counts["reachable_critical"] = counts.get("reachable_critical", 0) + 1
+                if r["status"] != "fixed":
+                    counts["open_critical"] = counts.get("open_critical", 0) + 1
         rid, wt, br = self.fresh_tree("evidence")
         try:
             documented = [r for r in rows if r["status"] == "documented"]

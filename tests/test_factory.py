@@ -588,6 +588,8 @@ def test_a_restart_resumes_the_audit_round_and_remembers_the_answer(tmp_path):
     f.store.x("UPDATE decisions SET answer = 'no', answered = ? WHERE id = ?", (time.time(), d[0]["id"]))
     t.join(60)
     assert not t.is_alive()
+    q = f.store.q("SELECT question FROM decisions")[0]["question"]
+    assert "1 critical found this round, 0 of them still open" in q, q
     # a restarted daemon does not ask again and runs no further round
     loop2 = AuditLoop(Factory.from_path(p))
     assert loop2.worker(0) is False
