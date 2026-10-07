@@ -26,8 +26,11 @@ for each:
    (`loops.specify`) for the user to review and approve? The spec is the one thing a human must sign
    off: nothing is built against it until they approve.
 3. **Language.** Bend 2 or Lean 4.
-4. **Trusted parts.** What may be assumed correct instead of proved: hash functions, cryptography,
-   precompiles, system calls via FFI. Each is a hole in the proof; get them explicitly.
+4. **Trusted parts and FFI.** FFI is banned by default and the gate enforces it: no Lean
+   `@[extern]`/`@[implemented_by]`, no native code linked from the lakefile, no Bend foreign imports.
+   Ask whether anything may be foreign, trusted code instead of proved code (hash functions,
+   cryptography, precompiles). Only what the user states goes in `ffi.allow`; each entry is a hole in
+   the proof.
 5. **Evidence beyond proofs.** Official test suites to pass, a reference implementation to test
    against (differential tests, fuzzing).
 6. **Performance.** Is there a speed target? Which benchmark, against which reference, measured how
@@ -368,10 +371,29 @@ checks with `ff check` before they submit.
 3. `workflow: generators`: regenerating must reproduce exactly the committed files.
 4. Frozen statements are unchanged. A change must be recorded in `frozen_changes.yaml` with a reason
    and the name of a proof that the new statement implies the old one.
-5. Every checked file passes within `file_timeout_seconds`, with nothing from `forbid`. Bend adds the
+5. No FFI outside `ffi.allow` (banned by default; see below).
+6. Every checked file passes within `file_timeout_seconds`, with nothing from `forbid`. Bend adds the
    `--verdict` kernel recheck; Lean adds an axiom audit (no hidden `sorry`).
-6. `unit_tests`, `vectors` and `runtime_tests` pass.
-7. Green: `main` moves to exactly that tree, and new statements are locked.
+7. `unit_tests`, `vectors` and `runtime_tests` pass.
+8. Green: `main` moves to exactly that tree, and new statements are locked.
+
+### FFI is banned unless the user allows it
+
+Foreign code is code the proofs say nothing about, so a program could move its real work there and
+still "check". The gate scans the whole candidate tree. It rejects:
+- Lean `@[extern]` and `@[implemented_by]`;
+- `extern_lib`, `moreLinkArgs`, `moreLeancArgs` and `precompileModules` in the lakefile;
+- Bend foreign imports (`import "x.c"`).
+
+These are allowed only in the files the user lists:
+
+```yaml
+ffi:
+  allow: ["Spec/Trusted.lean", "lakefile.lean"]
+  reason: precompiles are trusted C, as the user decided
+```
+
+`factory.yaml` lives outside the repository, so agents cannot widen the list.
 
 ## 11. Where things are
 

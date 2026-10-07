@@ -10,7 +10,8 @@ Deterministic Python, not an agent, so nobody can talk it into a shortcut. For a
   4. frozen statements: unchanged, or changed with a recorded, proved strengthening (lock from main)
   5. no forbidden construct; every file checks within its budget; language extras
      (bend --verdict kernel recheck, lean axiom audit)
-  6. unit tests, test vectors, runtime tests
+  6. no FFI outside the files the user allowed (ffi.allow); banned by default
+  7. unit tests, test vectors, runtime tests
   7. green: commit the updated lock (new statements locked) on top, and move main to exactly that
      tree with a compare-and-swap; push to the remote when one is configured.
 
@@ -68,6 +69,13 @@ def verify_tree(cfg: Config, root: Path, lock: dict[str, str], *, regenerate: bo
     if not fr.ok:
         return Verdict(False, "frozen", "frozen statements changed", "\n".join(log + fr.problems))
     log.append(f"frozen: {len(lock)} locked statements ok, {len(fr.added)} new, {len(fr.changed_ok)} recorded changes")
+    from .ffi import violations
+    bad = violations(root, cfg.project.language, cfg.ffi.allow)
+    if bad:
+        allowed = ", ".join(cfg.ffi.allow) or "nowhere"
+        return Verdict(False, "ffi", "FFI is banned unless the user allows it (ffi.allow in factory.yaml; "
+                       f"allowed: {allowed})", "\n".join(log + bad))
+    log.append("ffi: none outside " + (", ".join(cfg.ffi.allow) or "(FFI banned)"))
     files = [root / f for f in only] if only else None
     rep = checker.check(root, only=files, frozen_globs=cfg.spec.frozen, full=full)
     log.append("checker: " + rep.summary())

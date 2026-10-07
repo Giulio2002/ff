@@ -899,3 +899,34 @@ def test_the_factory_creates_and_wires_its_repository(tmp_path, monkeypatch):
     assert git(bare, "rev-parse", "main")
     assert f.ensure_repo() == ["main pushed to someone/new-target"], "idempotent: nothing created twice"
     assert calls.count("create") == 1
+
+
+def test_ffi_is_banned_unless_the_user_allows_it(tmp_path):
+    from ff.ffi import violations
+    (tmp_path / "Evm").mkdir()
+    (tmp_path / "Evm/Fast.lean").write_text('@[extern "lean_fast_interp"]\nopaque run : Nat → Nat\n')
+    (tmp_path / "Spec").mkdir()
+    (tmp_path / "Spec/Trusted.lean").write_text('@[extern "lean_keccak"] opaque keccak : Nat → Nat\n')
+    (tmp_path / "lakefile.lean").write_text('extern_lib ffi pkg := pure default\n')
+    (tmp_path / "ok.lean").write_text('-- mentions extern in a comment only: def externFoo := 1\ndef x := 1\n')
+    v = violations(tmp_path, "lean", [])
+    assert any(s.startswith("Evm/Fast.lean:1") for s in v) and any(s.startswith("lakefile.lean:1") for s in v)
+    assert any(s.startswith("Spec/Trusted.lean") for s in v) and not any(s.startswith("ok.lean") for s in v)
+    v = violations(tmp_path, "lean", ["Spec/Trusted.lean", "lakefile.lean"])
+    assert [s.split(":")[0] for s in v] == ["Evm/Fast.lean"], "allowed files are allowed, nothing else"
+    (tmp_path / "e.bend").write_text('def X.exchange(a: u8) -> IO(u8):\n  import "./x.c"\n')
+    assert violations(tmp_path, "bend", [])[0].startswith("e.bend:2")
+
+
+@needs_bend
+def test_the_gate_refuses_ffi(tmp_path):
+    repo = make_project(tmp_path, bug=False)
+    p = write_config(tmp_path, repo)
+    f = Factory.from_path(p)
+    from ff.cli import main as ff
+    assert ff(["--config", str(p), "freeze", "--yes"]) == 0
+    wt, br = f.ws.create("sneaky")
+    (wt / "ffi.bend").write_text('def Fast.add(a: u32) -> IO(u32):\n  import "./fast.c"\n')
+    f.ws.commit_pending(wt, "fast path in C")
+    v = f.gate.submit(br)
+    assert not v.ok and v.stage == "ffi" and "ffi.bend:2" in v.log

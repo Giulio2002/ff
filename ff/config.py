@@ -150,6 +150,13 @@ class Benchmark:
 
 
 @dataclass
+class Ffi:
+    """FFI is banned unless the user allows it here: the files (globs) where it may appear."""
+    allow: list[str] = field(default_factory=list)
+    reason: str = ""
+
+
+@dataclass
 class Gate:
     host: str = "local"            # or user@host: the gate runs `ff gate-run` there over ssh
     remote_config: str = ""        # path of factory.yaml on that host
@@ -239,6 +246,7 @@ class Config:
     limits: Limits
     accounts: Accounts = field(default_factory=Accounts)
     specify: SpecifyLoop = field(default_factory=SpecifyLoop)
+    ffi: Ffi = field(default_factory=Ffi)
     coordinator: str = "coordinator"
 
     def role(self, name: str) -> Role:
@@ -277,7 +285,7 @@ def load(path: str | os.PathLike) -> Config:
     raw = _expand(yaml.safe_load(path.read_text()) or {})
     base = path.parent
     top = {"project", "commands", "generated", "checker", "spec", "benchmark", "gate", "providers",
-           "roles", "loops", "limits", "coordinator", "accounts"}
+           "roles", "loops", "limits", "coordinator", "accounts", "ffi"}
     _no_extra(raw, top, "factory.yaml")
 
     p = _take(raw, "project", required=True, where="factory.yaml")
@@ -338,6 +346,9 @@ def load(path: str | os.PathLike) -> Config:
     gate_raw = _take(raw, "gate", {}) or {}
     _no_extra(gate_raw, set(Gate.__dataclass_fields__), "gate")
     gate = Gate(**gate_raw)
+    ffi_raw = _take(raw, "ffi", {}) or {}
+    _no_extra(ffi_raw, set(Ffi.__dataclass_fields__), "ffi")
+    ffi = Ffi(**ffi_raw)
 
     providers = {}
     for pname, pr in (_take(raw, "providers", required=True, where="factory.yaml") or {}).items():
@@ -435,6 +446,6 @@ def load(path: str | os.PathLike) -> Config:
 
     return Config(path=path, project=project, commands=commands,
                   generated=generated, checker=checker, spec=spec,
-                  benchmark=benchmark, gate=gate, providers=providers, roles=roles,
+                  benchmark=benchmark, gate=gate, providers=providers, roles=roles, ffi=ffi,
                   implement=implement, optimize=optimize, audit=audit, limits=Limits(**lim_raw), specify=specify,
                   accounts=accounts, coordinator=coordinator)
