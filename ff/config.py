@@ -120,6 +120,9 @@ class Spec:
     lock_file: str = "frozen.lock.json"                  # in the target repo, written only by the gate
     changes_file: str = "frozen_changes.yaml"            # every allowed change to a frozen statement
     require_implication_proof: bool = True               # a change must name a checked "new -> old" proof
+    # files agents may not change at all (the harness that judges them: tests, benchmark, entry
+    # points); the gate rejects a candidate that touches one. Only a human commits to these.
+    immutable: list[str] = field(default_factory=list)
 
 
 @dataclass

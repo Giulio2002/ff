@@ -930,3 +930,25 @@ def test_the_gate_refuses_ffi(tmp_path):
     f.ws.commit_pending(wt, "fast path in C")
     v = f.gate.submit(br)
     assert not v.ok and v.stage == "ffi" and "ffi.bend:2" in v.log
+
+
+@needs_bend
+def test_the_gate_refuses_changes_to_the_harness(tmp_path):
+    repo = make_project(tmp_path, bug=False)
+    (repo / "tools").mkdir(exist_ok=True)
+    (repo / "tools/bench.py").write_text("print(1)\n")
+    git(repo, "add", "-A")
+    git(repo, "-c", "user.name=t", "-c", "user.email=t@x", "commit", "-q", "-m", "harness")
+    p = write_config(tmp_path, repo)
+    import yaml
+    c = yaml.safe_load(p.read_text())
+    c["spec"]["immutable"] = ["tools/**"]
+    p.write_text(yaml.safe_dump(c))
+    f = Factory.from_path(p)
+    from ff.cli import main as ff
+    assert ff(["--config", str(p), "freeze", "--yes"]) == 0
+    wt, br = f.ws.create("faster-bench")
+    (wt / "tools/bench.py").write_text("print(0.1)\n")
+    f.ws.commit_pending(wt, "a faster benchmark")
+    v = f.gate.submit(br)
+    assert not v.ok and v.stage == "immutable" and "tools/bench.py" in v.log

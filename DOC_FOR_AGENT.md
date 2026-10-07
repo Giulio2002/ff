@@ -367,7 +367,9 @@ checks with `ff check` before they submit.
 
 1. It must contain the current `main`. The gate rebases stale candidates itself; only a real conflict
    goes back to the agent.
-2. `frozen.lock.json` is untouched. Only the gate writes it.
+2. `frozen.lock.json` is untouched (only the gate writes it), and so are the `spec.immutable`
+   files: the harness that judges the agents (tests, benchmark, entry points). Only a human
+   commits to those.
 3. `workflow: generators`: regenerating must reproduce exactly the committed files.
 4. Frozen statements are unchanged. A change must be recorded in `frozen_changes.yaml` with a reason
    and the name of a proof that the new statement implies the old one.

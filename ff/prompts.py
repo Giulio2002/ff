@@ -22,6 +22,7 @@ Rules of the factory (the gate enforces every one of them; breaking one wastes y
 - Every file in {check_files} must pass the checker within {file_budget}s.
   Forbidden anywhere in them: {forbid}.
 - {ffi_rule}
+- {immutable_rule}
 - {commit_rule}
 - Before you finish, run `ff check` in your worktree: it {check_does} the way the gate will
   (add `--files a b` to check only some).
@@ -137,6 +138,10 @@ def build(cfg: Config, role: Role, task: str, *, worktree: str, branch: str, res
                   f"FFI is banned except in {', '.join(cfg.ffi.allow)}, where the user allowed it"
                   + (f" ({cfg.ffi.reason})" if cfg.ffi.reason else "") + ". Nowhere else, and never to "
                   "move work the proofs should cover into foreign code."),
+        immutable_rule=(f"Never change {', '.join(cfg.spec.immutable)}: that is the harness that judges your work "
+                        "(tests, benchmark, entry points); the gate rejects any change to it. If it is wrong, say "
+                        "so in your summary or with `ff note`."
+                        if cfg.spec.immutable else "Tests and tools may be improved, never weakened."),
         subagent_tools="",
         unit_tests=cfg.commands.get("unit_tests", "(none)"),
         vectors=cfg.commands.get("vectors", "(none)"),

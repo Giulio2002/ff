@@ -4,7 +4,7 @@ Deterministic Python, not an agent, so nobody can talk it into a shortcut. For a
 
   0. the candidate must contain the current main (otherwise the caller rebases and asks again)
   1. cold: a fresh clone of the candidate commit, no caches
-  2. the lock file is untouched by the candidate (only the gate writes it)
+  2. the lock file and the spec.immutable files (the harness) are untouched by the candidate
   3. (workflow: generators) regenerate every generated file; the tree must be byte-identical to
      what was committed
   4. frozen statements: unchanged, or changed with a recorded, proved strengthening (lock from main)
@@ -140,6 +140,13 @@ class Gate:
         lock_path = self.cfg.spec.lock_file
         if git(self.repo, "diff", "--name-only", main_sha, cand, "--", lock_path):
             return done(Verdict(False, "lock", f"the candidate modifies {lock_path}; only the gate writes it"))
+        if self.cfg.spec.immutable:
+            import fnmatch
+            touched = [f for f in git(self.repo, "diff", "--name-only", main_sha, cand).splitlines()
+                       if any(fnmatch.fnmatch(f, g) for g in self.cfg.spec.immutable)]
+            if touched:
+                return done(Verdict(False, "immutable", "the candidate changes files agents may not change "
+                                    f"(spec.immutable: {', '.join(self.cfg.spec.immutable)})", "\n".join(touched)))
         if self.cfg.gate.host != "local":
             return done(self._remote(branch, cand))
         tree = self.dir / f"tree-{gid}"
