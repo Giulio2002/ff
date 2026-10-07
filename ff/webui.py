@@ -106,6 +106,11 @@ def state(cfg, store: Store) -> dict:
         m = re.search(r"benchmark ([0-9.]+)", e["message"] or "")
         if m:
             series.append(dict(ts=e["ts"], value=float(m.group(1)), kind="main"))
+    # main's latest measurement (the optimizer's baseline), even before any experiment is kept
+    base = store.flag(f"baseline:{main}") if main else None
+    if base:
+        t = store.q("SELECT MAX(ts) t FROM events WHERE kind IN ('agent-start', 'experiment-kept', 'gate-green')")[0]["t"]
+        series.append(dict(ts=t or now, value=float(base), kind="main"))
     series.sort(key=lambda p: p["ts"])
     experiments = store.q("SELECT COUNT(*) n, SUM(kept) k FROM experiments")[0]
 
