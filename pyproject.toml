@@ -20,3 +20,4 @@ include = ["ff*"]
 
 [tool.setuptools.package-data]
 "ff.roles" = ["*.md"]
+"ff" = ["webui.html"]

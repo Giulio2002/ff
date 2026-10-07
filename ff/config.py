@@ -138,6 +138,7 @@ class Benchmark:
     direction: str = "lower"       # lower or higher is better
     min_improvement_pct: float = 1.0
     target: float | None = None    # the goal: once main meets it the optimize loop stops (and audit may start)
+    unit: str = ""                 # how the number reads, for people (the web UI): "×", " ns", ...
     repeats: int = 3
     timeout_minutes: float = 30
     references: list[Reference] = field(default_factory=list)

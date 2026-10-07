@@ -54,6 +54,14 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("run", help="run the loops (and optionally the API) until interrupted")
     p.add_argument("--loops", default="", help="comma-separated subset of implement,optimize,audit")
     p.add_argument("--api", default="", help="also serve the steering API on [host:]port")
+    p.add_argument("--webui", default="", help="also serve the read-only progress page on [host:]port "
+                                               "(0.0.0.0:8080 to expose it)")
+    p.add_argument("--webui-token", default=os.environ.get("FF_WEBUI_TOKEN", ""),
+                   help="require this token for the page (open it once as /?token=...)")
+    p = sub.add_parser("webui", help="serve the read-only progress page on its own (next to a running daemon)")
+    p.add_argument("--listen", default="127.0.0.1:8080", help="[host:]port; 0.0.0.0:8080 to expose it")
+    p.add_argument("--token", default=os.environ.get("FF_WEBUI_TOKEN", ""),
+                   help="require this token for the page (open it once as /?token=...)")
     p = sub.add_parser("serve", help="serve the steering API only")
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=8787)
@@ -220,6 +228,13 @@ def cmd_run(a):
         srv = serve(f, host or "127.0.0.1", int(port))
         threading.Thread(target=srv.serve_forever, daemon=True).start()
         print(f"steering API on http://{host or '127.0.0.1'}:{port}  token: {srv.token}", flush=True)
+    web = None
+    if a.webui:
+        import threading
+        from . import webui
+        web = webui.serve(f.cfg, f.store, a.webui, a.webui_token or None)
+        threading.Thread(target=web.serve_forever, daemon=True).start()
+        print(f"progress page on http://{a.webui}" + (" (token required)" if a.webui_token else ""), flush=True)
     f.start_loops(names)
     print(f"factory {f.cfg.project.name} running loops: {', '.join(f.loops) or '(none)'}; state in "
           f"{f.cfg.project.state_dir}", flush=True)
@@ -238,6 +253,17 @@ def cmd_run(a):
     # do not wait for the loops' threads: they wait on agents that run in processes of their own and
     # that the next daemon adopts (an audit round's fixer pool would otherwise hold the exit for hours)
     os._exit(0)
+
+
+def cmd_webui(a):
+    from . import webui
+    f = _factory(a)
+    srv = webui.serve(f.cfg, f.store, a.listen, a.token or None)
+    print(f"progress page on http://{a.listen}" + (" (token required: open /?token=...)" if a.token else ""), flush=True)
+    try:
+        srv.serve_forever()
+    except KeyboardInterrupt:
+        pass
 
 
 def cmd_serve(a):

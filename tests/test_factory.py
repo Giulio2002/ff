@@ -800,3 +800,30 @@ def test_phases_follow_each_other_without_configuration(tmp_path):
     c["loops"]["audit"]["after"] = []     # explicit: audit at once
     p.write_text(yaml.safe_dump(c))
     assert load(p).audit.after == []
+
+
+def test_the_web_page_shows_progress_and_honours_its_token(tmp_path):
+    repo = make_project(tmp_path, bug=False)
+    p = write_config(tmp_path, repo)
+    f = Factory.from_path(p)
+    f.store.x("INSERT INTO backlog (item, status, attempts, updated, note) VALUES ('law:add', 'done', 1, 0, 'n')")
+    f.store.event("gate", "gate-green", "gate #1 GREEN for ff/x")
+    from ff import webui
+    st = webui.state(f.cfg, f.store)
+    assert st["backlog"][0]["item"] == "law:add" and st["events"][0]["label"] == "merged"
+    json.dumps(st)
+    srv = webui.serve(f.cfg, f.store, "127.0.0.1:0", "s3cret")
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    import urllib.error
+    try:
+        urllib.request.urlopen(f"http://127.0.0.1:{port}/state.json")
+        raise AssertionError("served without the token")
+    except urllib.error.HTTPError as e:
+        assert e.code == 401
+    page = urllib.request.urlopen(f"http://127.0.0.1:{port}/?token=s3cret")
+    assert b"Formal Factory" in page.read()
+    cookie = page.headers["set-cookie"].split(";")[0]
+    req = urllib.request.Request(f"http://127.0.0.1:{port}/state.json", headers={"cookie": cookie})
+    assert json.loads(urllib.request.urlopen(req).read())["project"] == f.cfg.project.name
+    srv.shutdown()
