@@ -24,6 +24,8 @@ Rules of the factory (the gate enforces every one of them; breaking one wastes y
 - {commit_rule}
 - Before you finish, run `ff check` in your worktree: it {check_does} the way the gate will
   (add `--files a b` to check only some).
+- To wait for a background job, wait on its PID (`while kill -0 PID; do sleep 5; done`), never on
+  `pgrep -f <pattern>`: the waiting shell's own command line matches the pattern, so it never ends.
 
 Tools the factory gives you (shell commands):
 - `ff check [--files ...]`            the gate's checks, locally

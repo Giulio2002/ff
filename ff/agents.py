@@ -50,6 +50,20 @@ def _kill(p: subprocess.Popen) -> None:
         pass
 
 
+RESULT_GRACE_SECONDS = 600   # how long a session that has written its result waits for leftover background jobs
+
+
+def _kill_tree(pid: int) -> None:
+    """SIGTERM pid's descendants, then pid (children first, so none is re-parented and missed)."""
+    import signal
+    for c in _children(pid):
+        _kill_tree(c)
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except OSError:
+        pass
+
+
 def _children(pid: int) -> list[int]:
     """Live child processes of pid (Linux /proc): an agent CLI's background commands."""
     out = []
@@ -480,6 +494,7 @@ class Runner:
     def _claude(self, run_id, prov: Provider, role: Role, model, system, user, worktree, env, transcript, d, deadline,
                 resume: str | None = None, info: dict | None = None):
         info = {} if info is None else info
+        result_file = d / "result.json"
         argv = [prov.binary, "-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
                 "--permission-mode", prov.permission_mode, "--append-system-prompt", system]
         if model:
@@ -522,13 +537,23 @@ class Runner:
 
         def close_when_idle(turn: int):
             """After the turn numbered `turn`, close the session once the agent has no background
-            processes left, unless a new turn starts (output arrives) or a message comes first."""
+            processes left, unless a new turn starts (output arrives) or a message comes first.
+            An agent that has written its result file is done: background jobs it left behind (a
+            wait loop that can never end, say) get RESULT_GRACE_SECONDS and are then ended."""
+            t0 = time.time()
             while p.poll() is None and time.time() < deadline:
                 if state.get("turns_seen") != turn or state.get("output_after", 0) > turn:
                     return            # the agent woke up (or a message arrived): a new turn is running
                 if deliver_pending():
                     return
-                if not _children(p.pid):
+                kids = _children(p.pid)
+                if not kids:
+                    break
+                if result_file is not None and Path(result_file).exists() and time.time() - t0 > RESULT_GRACE_SECONDS:
+                    self.store.event("agents", "leftover-jobs", f"{run_id} wrote its result; ending "
+                                     f"{len(kids)} background job(s) it left behind", run_id)
+                    for c in kids:
+                        _kill_tree(c)
                     break
                 time.sleep(3)
             if state.get("turns_seen") == turn and state.get("output_after", 0) <= turn:

@@ -731,3 +731,27 @@ def test_the_backlog_is_listed_again_only_when_main_moves(tmp_path):
     git(repo, "-c", "user.name=t", "-c", "user.email=t@x", "commit", "-q", "-m", "move main")
     loop.refresh_backlog()
     assert count.read_text().count("x") == 2
+
+
+def test_a_finished_agent_is_not_held_open_by_a_job_it_left_behind(tmp_path, monkeypatch):
+    monkeypatch.setenv("FF_AGENTS_HOME", str(tmp_path / "agents"))
+    import ff.agents
+    monkeypatch.setattr(ff.agents, "RESULT_GRACE_SECONDS", 2)
+    repo = make_project(tmp_path, bug=False)
+    p = write_config(tmp_path, repo)
+    import yaml
+    c = yaml.safe_load(p.read_text())
+    c["providers"]["claude"] = {"kind": "claude", "binary": str(ROOT / "tests/fake_claude.py"),
+                                "env": {"CLAUDE_CONFIG_DIR": str(tmp_path / "cfg")}}
+    c["roles"]["worker"] = {"provider": "claude", "timeout_minutes": 2}
+    p.write_text(yaml.safe_dump(c))
+    f = Factory.from_path(p)
+    wt, br = f.ws.create("left")
+    t0 = time.time()
+    r = f.runner.run("worker", "LEFTOVER-JOB", loop="adhoc", worktree=wt, branch=br)
+    assert r.status == "done" and time.time() - t0 < 60, (r, time.time() - t0)
+    pid = int((f.runner.runs_dir / r.run_id / "leftover.pid").read_text())
+    time.sleep(0.5)
+    alive = os.path.exists(f"/proc/{pid}") and open(f"/proc/{pid}/stat").read().split(")")[-1].split()[0] != "Z"
+    assert not alive, "the leftover job is ended"
+    assert any(e["kind"] == "leftover-jobs" for e in f.store.events())

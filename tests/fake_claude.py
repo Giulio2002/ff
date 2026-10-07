@@ -42,6 +42,16 @@ if "BACKGROUND-WAKE" in first:
     emit({"type": "result", "subtype": "success", "is_error": False, "result": "done", "session_id": sid,
           "total_cost_usd": 0, "usage": {}})
     sys.exit(0)
+if "LEFTOVER-JOB" in first:
+    # finish (result file written) but leave a background job that never ends, then wait for stdin
+    import subprocess as sp
+    bg = sp.Popen(["sleep", "1000"])
+    (Path(os.environ["FF_RESULT_FILE"]).parent / "leftover.pid").write_text(str(bg.pid))
+    Path(os.environ["FF_RESULT_FILE"]).write_text(json.dumps({"status": "done", "summary": "finished, job left"}))
+    emit({"type": "result", "subtype": "success", "is_error": False, "result": "done", "session_id": sid,
+          "total_cost_usd": 0, "usage": {}})
+    sys.stdin.read()      # the CLI ends when its input closes
+    sys.exit(0)
 if (cfg / "EXHAUSTED").exists():
     reset = (cfg / "EXHAUSTED").read_text().strip()
     emit({"type": "assistant", "message": {"model": "<synthetic>", "content": [
