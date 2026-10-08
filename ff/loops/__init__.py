@@ -447,7 +447,9 @@ class OptimizeLoop(Loop):
         waiting = []
         if self.cfg.specify.enabled and not self.store.flag("spec:approved"):
             waiting.append("specify (the specification is not approved yet)")
-        if self.cfg.implement.enabled and self.store.q(
+        if self.cfg.implement.enabled and self.cfg.implement.backlog_command and not self.store.flag("backlog:main"):
+            waiting.append("implement (its backlog is not listed yet)")
+        elif self.cfg.implement.enabled and self.store.q(
                 "SELECT 1 FROM backlog WHERE status IN ('open', 'running', 'blocked') AND loop = 'implement' "
                 "AND NOT item LIKE 'brief: %' LIMIT 1"):
             waiting.append("implement (open backlog items)")

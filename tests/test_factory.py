@@ -967,6 +967,10 @@ def test_optimize_waits_for_the_implementation(tmp_path):
     p.write_text(yaml.safe_dump(c))
     f = Factory.from_path(p)
     from ff.loops import ImplementLoop, OptimizeLoop
+    early = OptimizeLoop(f)                          # before implement has listed anything
+    early.stop.wait = lambda t=None: False
+    early.worker(0)
+    assert not f.store.q("SELECT 1 FROM runs") and f.store.flag("baseline:" + git(repo, "rev-parse", "main")) is None
     ImplementLoop(f).refresh_backlog()
     opt = OptimizeLoop(f)
     opt.stop.wait = lambda t=None: False
