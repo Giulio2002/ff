@@ -156,7 +156,10 @@ class Gate:
         v = verify_tree(self.cfg, tree, self.main_lock(), regenerate=self.cfg.gate.regenerate)
         if v.ok:
             final = cand
-            if v.added or v.new_lock != self.main_lock():
+            # while the specification is still being drafted (loops.specify, not approved yet) nothing
+            # is locked: the draft changes freely until approval freezes it all at once
+            drafting = self.cfg.specify.enabled and not self.store.flag("spec:approved")
+            if not drafting and (v.added or v.new_lock != self.main_lock()):
                 (tree / lock_path).write_text(frozen.dump_lock(v.new_lock))
                 git(tree, "add", lock_path)
                 git(tree, "-c", "user.name=formal-factory gate", "-c", "user.email=gate@localhost",

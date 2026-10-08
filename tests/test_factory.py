@@ -853,6 +853,8 @@ def test_agents_draft_the_spec_a_human_approves_it_then_implementation_starts(tm
     spec.stop.wait = lambda t=None: False
     spec.worker(0)                                   # drafts spec/notes.md through the gate
     assert "spec/notes.md" in git(repo, "ls-tree", "-r", "--name-only", "main")
+    assert "frozen.lock.json" not in git(repo, "ls-tree", "-r", "--name-only", "main"), \
+        "nothing is locked while the specification is a draft"
     assert f.store.q("SELECT status FROM backlog WHERE item = 'spec:notes'")[0]["status"] == "done"
     spec.worker(0)                                   # backlog empty: asks the human
     d = f.store.q("SELECT id, question FROM decisions WHERE answer IS NULL")
