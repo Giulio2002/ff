@@ -992,3 +992,10 @@ def test_auto_approval_freezes_the_spec_without_asking(tmp_path):
     spec.worker(0)
     assert f.store.flag("spec:approved") and not f.store.q("SELECT 1 FROM decisions")
     assert "frozen.lock.json" in git(repo, "ls-tree", "-r", "--name-only", "main")
+
+
+def test_lean_statements_carry_their_namespace():
+    from ff.frozen import lean_statements
+    src = "namespace A.B\ntheorem t : 1 = 1 := rfl\nsection\ndef d := 1\nend\nend A.B\ntheorem _root_.u : True := trivial\ntheorem v : 2 = 2 := rfl\n"
+    keys = [s.key for s in lean_statements("X.lean", src)]
+    assert keys == ["X.lean::A.B.t", "X.lean::A.B.d", "X.lean::u", "X.lean::v"], keys

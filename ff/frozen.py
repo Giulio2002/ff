@@ -82,13 +82,24 @@ def lean_statements(rel: str, source: str) -> list[Statement]:
     # drop block comments first; line comments are dropped by _normalise
     source = re.sub(r"/-.*?-/", "", source, flags=re.S)
     lines = source.splitlines()
+    # the namespace each line is in (`namespace A.B` ... `end A.B`; `section` opens an unnamed scope),
+    # so a statement's key carries its full name: the axiom audit looks it up by that name
+    scope_at, stack = [], []
+    for line in lines:
+        m = re.match(r"^(namespace|section)\b\s*([\w.]*)", line)
+        if m:
+            stack.append(m.group(2) if m.group(1) == "namespace" else "")
+        elif re.match(r"^end\b", line) and stack:
+            stack.pop()
+        scope_at.append([s for s in stack if s])
     out = []
     for kw, name, i in _blocks(lines, LEAN_START):
         text = _block_text(lines, i)
         if kw in ("theorem", "lemma"):
             # the statement is everything up to the first top-level `:=`
             text = re.split(r":=", text, maxsplit=1)[0]
-        out.append(Statement(f"{rel}::{name}", _normalise(f"{kw}\n{text}", "--")))
+        full = name.removeprefix("_root_.") if name.startswith("_root_.") else ".".join(scope_at[i] + [name])
+        out.append(Statement(f"{rel}::{full}", _normalise(f"{kw}\n{text}", "--")))
     return out
 
 
