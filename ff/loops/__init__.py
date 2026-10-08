@@ -363,6 +363,8 @@ class SpecifyLoop(ImplementLoop):
         self.stop.wait(30)
 
     def ask_for_approval(self) -> None:
+        if self.store.flag("spec:approved"):
+            return                            # another worker got here first
         main = sha(self.cfg.project.repo, self.cfg.project.main_branch)
         if self.cfg.specify.approval == "auto":
             n = self.f.freeze(force=True)

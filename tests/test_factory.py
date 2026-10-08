@@ -990,7 +990,9 @@ def test_auto_approval_freezes_the_spec_without_asking(tmp_path):
     spec = SpecifyLoop(f)
     spec.stop.wait = lambda t=None: False
     spec.worker(0)
+    spec.ask_for_approval()                       # a second worker arriving late: no second freeze
     assert f.store.flag("spec:approved") and not f.store.q("SELECT 1 FROM decisions")
+    assert len([e for e in f.store.events() if e["kind"] == "frozen"]) == 1
     assert "frozen.lock.json" in git(repo, "ls-tree", "-r", "--name-only", "main")
 
 
