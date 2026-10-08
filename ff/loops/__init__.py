@@ -3,6 +3,7 @@ All of them hand their work to the same gate."""
 from __future__ import annotations
 
 import json
+import subprocess
 import re
 import statistics
 import threading
@@ -430,6 +431,15 @@ class OptimizeLoop(Loop):
             self.store.set_flag(key, str(v))
         return v
 
+    def reuse_measurement(self, measured: str, value: float) -> None:
+        """The kept candidate was benchmarked at commit `measured`. If main is that same code (the gate
+        may only have added its lock commit), that number is main's baseline: no second benchmark."""
+        repo, main = self.cfg.project.repo, sha(self.cfg.project.repo, self.cfg.project.main_branch)
+        same = subprocess.run(["git", "diff", "--quiet", measured, main, "--", ".",
+                               f":(exclude){self.cfg.spec.lock_file}"], cwd=repo).returncode == 0
+        if same:
+            self.store.set_flag(f"baseline:{main}", str(value))
+
     def at_target(self, value: float) -> bool:
         t = self.cfg.benchmark.target
         if t is None:
@@ -494,6 +504,7 @@ class OptimizeLoop(Loop):
         def accept(r: RunResult, wt: Path):
             cand = self.measure(wt)
             seen["cand"] = cand
+            seen["commit"] = sha(wt, "HEAD")
             if cand is None:
                 return False, "benchmark failed on the candidate"
             gain = self.better(base, cand)
@@ -506,6 +517,8 @@ class OptimizeLoop(Loop):
                          accept=accept, resume=resume, state={"baseline": base})
         if out.status == "superseded":
             return
+        if out.ok and seen.get("cand") is not None and seen.get("commit"):
+            self.reuse_measurement(seen["commit"], seen["cand"])
         idea = (out.result or {}).get("idea") or out.summary[:200]
         reason = out.summary if not out.ok else f"{seen.get('gain', 0):+.2f}%"
         self.store.x("INSERT INTO experiments (run_id, idea, baseline, candidate, kept, reason, ts) VALUES (?,?,?,?,?,?,?)",

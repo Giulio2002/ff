@@ -1005,3 +1005,25 @@ def test_lean_statements_carry_their_namespace():
     src = "namespace A.B\ntheorem t : 1 = 1 := rfl\nsection\ndef d := 1\nend\nend A.B\ntheorem _root_.u : True := trivial\ntheorem v : 2 = 2 := rfl\n"
     keys = [s.key for s in lean_statements("X.lean", src)]
     assert keys == ["X.lean::A.B.t", "X.lean::A.B.d", "X.lean::u", "X.lean::v"], keys
+
+
+def test_a_kept_experiment_s_measurement_is_main_s_baseline(tmp_path):
+    repo = make_project(tmp_path, bug=False)
+    p = write_config(tmp_path, repo)
+    import yaml
+    c = yaml.safe_load(p.read_text())
+    c["benchmark"] = {"command": "echo 1", "repeats": 1}
+    c["roles"]["optimizer"] = {"provider": "fake"}
+    c["loops"]["optimize"] = {"enabled": True}
+    p.write_text(yaml.safe_dump(c))
+    f = Factory.from_path(p)
+    from ff.loops import OptimizeLoop
+    opt = OptimizeLoop(f)
+    measured = git(repo, "rev-parse", "main")
+    opt.reuse_measurement(measured, 2.5)
+    assert f.store.flag(f"baseline:{measured}") == "2.5"
+    (repo / "NOTE.txt").write_text("x")
+    git(repo, "add", "-A")
+    git(repo, "-c", "user.name=t", "-c", "user.email=t@x", "commit", "-q", "-m", "other code")
+    opt.reuse_measurement(measured, 2.0)
+    assert f.store.flag("baseline:" + git(repo, "rev-parse", "main")) is None, "different code is measured again"
