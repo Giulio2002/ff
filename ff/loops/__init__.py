@@ -332,8 +332,17 @@ class SpecifyLoop(ImplementLoop):
     """Agents write the specification itself, item by item; the human approves it, which freezes
     it. Implementation starts after that (ImplementLoop.worker waits for spec:approved)."""
     name = "specify"
-    task_intro = ("Write this part of the specification. It will be frozen once a human approves it, "
-                  "so make it faithful to its source and easy to review side by side with it:")
+
+    @property
+    def task_intro(self) -> str:
+        if self.cfg.specify.approval == "auto":
+            return ("Write this part of the specification. Nobody reviews it by hand: it is frozen automatically "
+                    "as soon as the spec backlog is empty, and everything after is proved against it, so it must "
+                    "be faithful to its source in every detail and pass the specification's checks:")
+        return SpecifyLoop._human_intro
+
+    _human_intro = ("Write this part of the specification. It will be frozen once a human approves it, "
+                    "so make it faithful to its source and easy to review side by side with it:")
 
     def worker(self, i: int):
         if not self.wait_unpaused():
