@@ -355,6 +355,13 @@ class SpecifyLoop(ImplementLoop):
 
     def ask_for_approval(self) -> None:
         main = sha(self.cfg.project.repo, self.cfg.project.main_branch)
+        if self.cfg.specify.approval == "auto":
+            n = self.f.freeze(force=True)
+            self.store.set_flag("spec:approved", str(time.time()))
+            self.log("spec-approved", f"the specification is complete (spec backlog empty) and approved "
+                                      f"automatically (loops.specify.approval: auto): {n} statements frozen on "
+                                      f"{main[:10]}; implementation starts")
+            return
         asked = self.store.flag("spec:asked") or ""
         if asked == "declined@" + main:
             return                            # asked again once main moves (the requested changes landed)

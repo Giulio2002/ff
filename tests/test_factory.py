@@ -972,3 +972,21 @@ def test_optimize_waits_for_the_implementation(tmp_path):
     assert not f.store.q("SELECT 1 FROM runs"), "no benchmark, no optimizer while items are open"
     assert any(e["kind"] == "waiting" and "implement" in e["message"] for e in f.store.events())
     assert f.store.flag("baseline:" + git(repo, "rev-parse", "main")) is None
+
+
+@needs_bend
+def test_auto_approval_freezes_the_spec_without_asking(tmp_path):
+    repo = make_project(tmp_path, bug=False)
+    p = write_config(tmp_path, repo)
+    import yaml
+    c = yaml.safe_load(p.read_text())
+    c["roles"]["specifier"] = {"provider": "fake", "timeout_minutes": 1}
+    c["loops"]["specify"] = {"enabled": True, "approval": "auto", "backlog_command": "true"}
+    p.write_text(yaml.safe_dump(c))
+    f = Factory.from_path(p)
+    from ff.loops import SpecifyLoop
+    spec = SpecifyLoop(f)
+    spec.stop.wait = lambda t=None: False
+    spec.worker(0)
+    assert f.store.flag("spec:approved") and not f.store.q("SELECT 1 FROM decisions")
+    assert "frozen.lock.json" in git(repo, "ls-tree", "-r", "--name-only", "main")

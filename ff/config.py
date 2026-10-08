@@ -187,6 +187,10 @@ class SpecifyLoop:
     workers: int = 2
     max_attempts: int = 3
     backlog_command: str = ""
+    # human: the user approves the drafted spec (a decision); auto: it is frozen as soon as the spec
+    # backlog is empty (the backlog command decides when the spec is complete and checked), for users
+    # who leave the specification end to end to the agents
+    approval: str = "human"
 
 
 @dataclass
@@ -401,6 +405,8 @@ def load(path: str | os.PathLike) -> Config:
         used.append(specify.role)
         if not specify.backlog_command:
             raise ConfigError("loops.specify is enabled but has no backlog_command")
+        if specify.approval not in ("human", "auto"):
+            raise ConfigError("loops.specify.approval must be 'human' or 'auto'")
     if implement.enabled:
         used.append(implement.role)
     if optimize.enabled:

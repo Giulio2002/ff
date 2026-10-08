@@ -207,8 +207,11 @@ With an existing specification, after the user has approved it:
 ff freeze --yes
 ```
 
-With `loops.specify`, skip this: agents draft the spec from the spec backlog, and when it is complete
-the factory asks the user (a decision in `ff status`, the chat and the web UI) to approve it.
+With `loops.specify`, skip this: agents draft the spec from the spec backlog. With
+`approval: auto` (the user leaves the spec end to end to the agents), it is frozen as soon as the spec
+backlog is empty, so make the spec backlog command demand real evidence (e.g. the spec checked against
+a reference implementation). With `approval: human` (the default), when it is complete the factory
+asks the user (a decision in `ff status`, the chat and the web UI) to approve it.
 Approving freezes it and starts implementation. Answering anything else keeps it open: brief the
 specify loop with what to change (`ff brief specify "..."`), and it asks again once that has landed.
 
