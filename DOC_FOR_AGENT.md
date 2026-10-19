@@ -50,7 +50,8 @@ for each:
    With no account in the pool, agents use the machine's default `claude`/`codex` login. Once the
    pool has accounts, the default login is no longer used, so add the current one too.
 10. **The web UI.** Do they want the read-only progress page (`--webui`)? On localhost only, or exposed
-    to the internet? Behind a token (`--webui-token`)?
+    to the internet? Behind a token (`--webui-token`)? The page never shows code unless the repository is public, it has a
+    token, or `--webui-details` is passed: then it also shows frozen statements and agents' last actions.
 11. **Budget and attention.** Is there a spend limit they want reported against? How often should you
     report? Which decisions do they want to be asked about?
 
@@ -150,6 +151,7 @@ benchmark:                       # only for the optimize loop
   metric: '"ratio": ([0-9.]+)'   # regex; group 1 is the number
   direction: lower
   min_improvement_pct: 3         # a change must beat main by this much to be kept
+  versus: geth v1.17.8           # what the number is measured against (the web UI's label)
   target: 3.0                    # the goal: optimizing stops once main meets it
   references:                    # the fastest baseline, for the optimizer to learn from
     - name: geth-modexp
@@ -188,6 +190,7 @@ loops:
 
 limits:
   max_parallel_agents: 4
+  # budget_usd: 200              # the spend to report against (web UI); nothing stops at it
   nice: 19                       # checker, tests and benchmarks run at low priority
 ```
 

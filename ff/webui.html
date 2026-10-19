@@ -6,131 +6,238 @@
 <title>Formal Factory</title>
 <style>
 :root {
-  --bg: #0d1117; --panel: #151b23; --panel2: #1b2330; --line: #2a3442; --text: #e6edf3; --dim: #8b98a8;
-  --accent: #7c9cff; --good: #3fb950; --bad: #f85149; --warn: #d29922; --crit: #ff5d73; --high: #ff9f43;
-  --med: #e3c75b; --low: #7d8a9c; --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --bg: #0b0d12; --panel: #12151c; --panel2: #171b24; --track: #161a22; --line: #222835; --text: #e7e9ee;
+  --dim: #8b92a1; --faint: #5b6273;
+  --spec: #7cc47f; --impl: #7c9cf0; --opt: #b48cf2; --aud: #e3b04b; --gate: #5d6474;
+  --good: #7cc47f; --bad: #e5534b; --warn: #e3b04b; --acc: #7c9cf0;
+  --crit: #ff5d73; --high: #ff9f43; --med: #e3c75b; --low: #7d8a9c;
+  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif;
+  --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
 }
 @media (prefers-color-scheme: light) {
   :root:not([data-theme="dark"]) {
-    --bg: #f6f8fa; --panel: #ffffff; --panel2: #f0f3f6; --line: #d8dee4; --text: #1f2328; --dim: #59636e;
-    --accent: #3b5bdb; --good: #1a7f37; --bad: #cf222e; --warn: #9a6700; --crit: #c9184a; --high: #d9480f;
-    --med: #9a6700; --low: #6e7781;
+    --bg: #f5f6f8; --panel: #ffffff; --panel2: #f1f3f6; --track: #f0f2f5; --line: #dfe3e9; --text: #1d2129;
+    --dim: #5d6573; --faint: #9aa1ad; --spec: #2f9e44; --impl: #3b5bdb; --opt: #7c4dcc; --aud: #b7791f; --gate: #9aa1ad;
+    --good: #2f9e44; --bad: #d63b33; --warn: #b7791f; --acc: #3b5bdb;
   }
 }
 * { box-sizing: border-box; }
-body { margin: 0; background: var(--bg); color: var(--text);
-  font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif; }
-.wrap { max-width: 1180px; margin: 0 auto; padding: 24px 16px 64px; }
-header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 10px 18px; margin-bottom: 18px; }
-h1 { font-size: 26px; margin: 0; letter-spacing: -0.02em; }
-h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .08em; color: var(--dim); margin: 0 0 12px; font-weight: 600; }
-.badge { font: 12px var(--mono); padding: 2px 8px; border: 1px solid var(--line); border-radius: 99px; color: var(--dim); }
-.live { margin-left: auto; color: var(--dim); font-size: 13px; display: flex; align-items: center; gap: 8px; }
-.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--good); box-shadow: 0 0 0 0 var(--good); animation: pulse 2s infinite; }
-.dot.stale { background: var(--bad); animation: none; }
-@keyframes pulse { 0% { box-shadow: 0 0 0 0 rgba(63,185,80,.5) } 70% { box-shadow: 0 0 0 8px rgba(63,185,80,0) } 100% { box-shadow: 0 0 0 0 rgba(63,185,80,0) } }
-.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 18px; }
-.grid { display: grid; gap: 14px; }
-.cols-5 { grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); }
-.cols-2 { grid-template-columns: 1.4fr 1fr; }
-@media (max-width: 860px) { .cols-2 { grid-template-columns: 1fr; } }
-.section { margin-top: 14px; }
+html, body { margin: 0; background: var(--bg); color: var(--text); }
+body { font: 15px/1.5 var(--sans); }
+.wrap { max-width: 1320px; margin: 0 auto; padding: 28px 16px 64px; }
+a { color: inherit; }
+.mono { font-family: var(--mono); }
+.dim { color: var(--dim); } .faint { color: var(--faint); }
+.good { color: var(--good); } .bad { color: var(--bad); } .warn { color: var(--warn); }
 
-/* phases */
-.phases { display: flex; gap: 0; margin-bottom: 8px; }
-.phase { flex: 1; position: relative; padding: 14px 10px 12px; text-align: center; color: var(--dim);
-  border-top: 4px solid var(--line); font-weight: 600; text-transform: capitalize; }
-.phase.done { color: var(--good); border-color: var(--good); }
-.phase.now { color: var(--accent); border-color: var(--accent); }
-.phase.now::after { content: "now"; position: absolute; top: -26px; left: 50%; transform: translateX(-50%);
-  font-size: 11px; background: var(--accent); color: #fff; padding: 1px 8px; border-radius: 99px; text-transform: none; }
-.phase small { display: block; font-weight: 400; font-size: 12px; color: var(--dim); }
-.story { font-size: 17px; margin: 6px 2px 0; }
-.alert { border-color: var(--warn); background: color-mix(in srgb, var(--warn) 10%, var(--panel)); margin-bottom: 14px; }
+/* header */
+header { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 14px; margin-bottom: 22px; }
+h1 { font-size: 30px; margin: 0 6px 0 0; letter-spacing: -0.02em; font-weight: 700; }
+.pill { font: 13px var(--mono); padding: 3px 12px; border: 1px solid var(--line); border-radius: 99px; color: var(--dim); }
+.pill b { color: var(--text); font-weight: 500; }
+.hstats { margin-left: auto; display: flex; flex-wrap: wrap; gap: 6px 26px; font: 14px var(--mono); color: var(--dim); align-items: center; }
+.hstats b { color: var(--text); font-weight: 600; }
+.live { display: inline-flex; align-items: center; gap: 8px; }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--good); }
+.dot.stale { background: var(--bad); }
+
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 16px; padding: 22px 24px; min-width: 0; }
+.grid { display: grid; gap: 18px; }
+.section { margin-top: 18px; }
+.two { grid-template-columns: 1fr 1fr; }
+.feed { grid-template-columns: 1.45fr 1fr; align-items: start; }
+.stack { display: grid; gap: 18px; }
+@media (max-width: 960px) { .two, .feed { grid-template-columns: 1fr; } }
+.ttl { font: 13px var(--mono); letter-spacing: .12em; text-transform: uppercase; color: var(--dim); margin: 0; }
+.head { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 8px 16px; margin-bottom: 18px; }
+.legend { display: flex; flex-wrap: wrap; gap: 4px 16px; font-size: 13px; color: var(--dim); align-items: center; }
+.legend i { display: inline-block; width: 11px; height: 11px; border-radius: 3px; margin-right: 6px; vertical-align: -1px; }
+.empty { color: var(--dim); font-style: italic; }
+.alert { border-color: var(--warn); background: color-mix(in srgb, var(--warn) 10%, var(--panel)); margin-bottom: 18px; padding: 14px 20px; }
+
+/* stages */
+.stages { display: grid; grid-template-columns: repeat(var(--n, 5), minmax(0, 1fr)); gap: 0 10px; }
+@media (max-width: 760px) { .stages { grid-template-columns: 1fr 1fr; gap: 18px 12px; } }
+.stage .sbar { height: 4px; border-radius: 99px; background: var(--line); overflow: hidden; margin-bottom: 14px; }
+.stage .sbar i { display: block; height: 100%; border-radius: 99px; }
+.stage .sname { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; font-size: 20px; font-weight: 500; color: var(--dim); }
+.stage .sname span:last-child { font: 14px var(--mono); color: var(--dim); font-weight: 400; }
+.stage .ssub { font-size: 14px; color: var(--dim); margin-top: 6px; }
+.storyrow { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline; gap: 8px 24px;
+  border-top: 1px solid var(--line); margin-top: 22px; padding-top: 20px; }
+.story { font-size: 18px; }
+.next { font: 14px var(--mono); color: var(--dim); }
+.next b { color: var(--text); font-weight: 500; }
 
 /* stat cards */
-.stat .big { font-size: 30px; font-weight: 700; letter-spacing: -0.02em; line-height: 1.1; }
-.stat .sub { color: var(--dim); font-size: 13px; margin-top: 4px; }
-.bar { height: 6px; background: var(--panel2); border-radius: 99px; overflow: hidden; margin-top: 10px; }
-.bar > i { display: block; height: 100%; background: var(--accent); border-radius: 99px; }
-.good { color: var(--good); } .bad { color: var(--bad); } .warn { color: var(--warn); } .dim { color: var(--dim); }
-
-/* chart */
-svg text { fill: var(--dim); font: 11px var(--mono); }
-.chart-note { color: var(--dim); font-size: 13px; margin-top: 8px; }
-
-/* agents */
-.agent { padding: 12px 0; border-top: 1px solid var(--line); }
-.agent:first-of-type { border-top: 0; padding-top: 0; }
-.agent b { font-weight: 600; }
-.agent .t { color: var(--dim); font-size: 13px; }
-.agent .note { margin-top: 6px; font-size: 13px; border-left: 3px solid var(--accent); padding-left: 10px; color: var(--text); }
-.empty { color: var(--dim); font-style: italic; }
-
-/* gates */
-.squares { display: flex; flex-wrap: wrap; gap: 4px; }
-.sq { width: 16px; height: 16px; border-radius: 4px; background: var(--good); }
-.sq.red { background: var(--bad); opacity: .75; } .sq.running { background: var(--warn); animation: blink 1.2s infinite; }
-@keyframes blink { 50% { opacity: .35 } }
-
-/* audit */
-.round { border-top: 1px solid var(--line); padding: 12px 0; }
-.round:first-of-type { border-top: 0; padding-top: 0; }
-.chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0; }
-.chip { font-size: 12px; padding: 1px 9px; border-radius: 99px; border: 1px solid var(--line); }
-.chip.critical { color: var(--crit); border-color: var(--crit); } .chip.high { color: var(--high); border-color: var(--high); }
-.chip.medium { color: var(--med); border-color: var(--med); } .chip.low { color: var(--low); }
-details summary { cursor: pointer; color: var(--dim); font-size: 13px; }
-.finding { display: grid; grid-template-columns: 70px 90px 1fr; gap: 8px; font-size: 13px; padding: 4px 0; }
-.sev { font-weight: 600; text-transform: uppercase; font-size: 11px; padding-top: 2px; }
-.sev.critical { color: var(--crit); } .sev.high { color: var(--high); } .sev.medium { color: var(--med); } .sev.low { color: var(--low); }
+.cards { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+@media (max-width: 1100px) { .cards { grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); } }
+.card .big { font-size: 40px; font-weight: 700; letter-spacing: -0.02em; line-height: 1.15; margin: 14px 0 10px; }
+.card .big .of { color: var(--faint); }
+.card .big small { font-size: 19px; font-weight: 500; color: var(--text); letter-spacing: 0; }
+.card .big .unit { font-size: 22px; font-weight: 400; color: var(--dim); letter-spacing: 0; }
+.card .sub { color: var(--dim); font-size: 14px; }
+.bar { height: 5px; background: var(--line); border-radius: 99px; overflow: hidden; margin-top: 14px; display: flex; gap: 3px; }
+.bar.solid { gap: 0; }
+.bar i { display: block; height: 100%; border-radius: 99px; }
 
 /* timeline */
-.ev { display: grid; grid-template-columns: 74px 1fr; gap: 10px; padding: 7px 0; border-top: 1px solid var(--line); font-size: 14px; }
-.ev:first-child { border-top: 0; }
-.ev .when { color: var(--dim); font-size: 12px; padding-top: 2px; }
-.ev .lbl { font-weight: 600; margin-right: 6px; }
-.ev .lbl.good { color: var(--good); } .ev .lbl.bad { color: var(--bad); } .ev .lbl.acc { color: var(--accent); }
-.ev .txt { color: var(--dim); }
-.items { display: flex; flex-wrap: wrap; gap: 6px; }
-.item { font: 12px var(--mono); padding: 2px 8px; border-radius: 6px; background: var(--panel2); }
-.item.done { color: var(--good); } .item.blocked { color: var(--bad); } .item.running { color: var(--accent); }
-.costrow { display: grid; grid-template-columns: 140px 1fr 70px; gap: 10px; align-items: center; font-size: 13px; margin: 6px 0; }
+.tl { display: grid; grid-template-columns: 230px 1fr; row-gap: 10px; align-items: center; }
+@media (max-width: 700px) { .tl { grid-template-columns: 110px 1fr; } }
+.tl .lab { font: 14px var(--mono); color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; padding-right: 12px; }
+.tl .lab.sub { color: var(--dim); }
+.track { position: relative; height: 36px; background: var(--track); border-radius: 6px; }
+.seg { position: absolute; top: 5px; bottom: 5px; border-radius: 3px; overflow: hidden; white-space: nowrap;
+  font: 14px var(--mono); color: #0b0d12; padding: 3px 10px 0; min-width: 3px; }
+.seg.running { background-image: linear-gradient(90deg, transparent 70%, rgba(255,255,255,.18)); }
+.seg.failed { opacity: .55; }
+.seg.gate { background: var(--gate); padding: 0; }
+.seg.gate.red { background: var(--bad); opacity: .7; } .seg.gate.running { background: var(--warn); }
+.tick { position: absolute; top: 1px; bottom: 1px; width: 2px; background: var(--text); border-radius: 1px; }
+.axis { position: relative; height: 22px; font: 13px var(--mono); color: var(--faint); }
+.axis span { position: absolute; transform: translateX(-50%); top: 4px; }
+.axis span:first-child { transform: none; }
+
+/* agents */
+.agents { display: grid; gap: 16px; }
+.agent { border: 1px solid var(--line); border-radius: 14px; padding: 18px 22px; background: var(--panel); }
+.agent .top { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.agent .name { font-size: 19px; font-weight: 600; }
+.agent .clock { margin-left: auto; font: 14px var(--mono); color: var(--dim); }
+.tag { font: 13px var(--mono); padding: 1px 10px; border-radius: 99px; border: 1px solid; }
+.tag.implement { color: var(--impl); border-color: color-mix(in srgb, var(--impl) 60%, transparent); }
+.tag.specify { color: var(--spec); border-color: color-mix(in srgb, var(--spec) 60%, transparent); }
+.tag.optimize { color: var(--opt); border-color: color-mix(in srgb, var(--opt) 60%, transparent); }
+.tag.audit { color: var(--aud); border-color: color-mix(in srgb, var(--aud) 60%, transparent); }
+.agent .task { margin: 10px 0 12px; color: var(--text); overflow-wrap: anywhere; }
+.log { background: var(--bg); border-radius: 8px; padding: 12px 16px; font: 13.5px/1.75 var(--mono); color: var(--dim);
+  white-space: pre-wrap; overflow-wrap: anywhere; }
+.log.note { border-left: 3px solid var(--acc); }
+.meta { display: flex; flex-wrap: wrap; gap: 4px 24px; margin-top: 14px; font: 14px var(--mono); color: var(--dim); }
+.meta b { color: var(--text); font-weight: 500; }
+
+/* contract */
+.file { margin-bottom: 22px; }
+.file .fh { display: flex; justify-content: space-between; gap: 12px; font: 14px var(--mono); margin-bottom: 10px; }
+.file .fh span:last-child { color: var(--dim); white-space: nowrap; }
+.cells { display: flex; flex-wrap: wrap; gap: 6px; }
+.cell { width: 32px; height: 32px; border-radius: 6px; background: var(--panel2); border: 2px solid transparent; cursor: default; }
+.cell.proven { background: color-mix(in srgb, var(--good) 75%, var(--panel)); }
+.cell.proving { border-color: var(--impl); background: color-mix(in srgb, var(--impl) 12%, var(--panel2)); }
+.cell.failed { background: color-mix(in srgb, var(--bad) 80%, var(--panel)); }
+.cell.on { outline: 2px solid var(--text); outline-offset: 1px; }
+.cinfo { border-top: 1px solid var(--line); padding-top: 14px; margin-top: 8px; font: 14px var(--mono); color: var(--dim); min-height: 48px; }
+.cinfo pre { margin: 8px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text); font: 13px/1.5 var(--mono); max-height: 220px; overflow: auto; }
+
+/* charts */
+svg { display: block; width: 100%; height: auto; overflow: visible; }
+svg text { fill: var(--dim); font: 12px var(--mono); }
+.costrow { display: grid; grid-template-columns: minmax(90px, 200px) 1fr 64px; gap: 14px; align-items: center; font: 14px var(--mono); margin: 8px 0; }
+.costrow span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.costrow span:last-child { text-align: right; }
 .costrow .bar { margin: 0; }
-footer { color: var(--dim); font-size: 12px; margin-top: 28px; text-align: center; }
+
+/* events */
+.chips { display: flex; flex-wrap: wrap; gap: 8px; }
+.fchip { font: 14px var(--mono); padding: 4px 14px; border-radius: 99px; border: 1px solid var(--line); background: none; color: var(--dim); cursor: pointer; }
+.fchip.on { background: var(--panel2); color: var(--text); }
+.ev { display: grid; grid-template-columns: 100px 18px 1fr; gap: 6px 10px; padding: 16px 0; border-top: 1px solid var(--line); cursor: pointer; }
+.ev .when { font: 13px var(--mono); color: var(--faint); padding-top: 3px; }
+.ev .d { width: 9px; height: 9px; border-radius: 50%; margin-top: 8px; background: var(--faint); }
+.ev .t { font-weight: 600; font-size: 16px; }
+.ev .x { color: var(--text); opacity: .85; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ev.open .x { white-space: pre-wrap; overflow-wrap: anywhere; }
+.k-good .t { color: var(--good); } .k-good .d { background: var(--good); }
+.k-bad .t { color: var(--bad); } .k-bad .d { background: var(--bad); }
+.k-acc .t { color: var(--acc); } .k-acc .d { background: var(--acc); }
+.k-dim .t { color: var(--text); } .k-dim .d { background: var(--dim); }
+@media (max-width: 600px) { .ev { grid-template-columns: 70px 14px 1fr; } }
+
+/* work items */
+.flow { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 6px; margin-bottom: 12px; }
+.flow .arr { color: var(--faint); font-size: 13px; }
+.wi { font: 14px var(--mono); padding: 4px 12px; border-radius: 8px; border: 1px solid var(--line); color: var(--faint); }
+.wi.done { color: var(--spec); border-color: color-mix(in srgb, var(--spec) 70%, transparent); }
+.wi.running { color: var(--text); border-color: var(--impl); background: color-mix(in srgb, var(--impl) 22%, transparent); }
+.wi.open { color: var(--text); border-color: var(--dim); }
+.wi.blocked { color: var(--bad); border-color: var(--bad); }
+
+/* gates */
+.gh { display: grid; grid-template-columns: 18px 48px 1fr auto; gap: 4px 12px; align-items: center; font: 14px var(--mono); padding: 5px 0; }
+.gh .sq { width: 16px; height: 16px; border-radius: 4px; background: var(--good); }
+.gh .sq.red { background: var(--bad); } .gh .sq.running { background: var(--warn); animation: blink 1.2s infinite; }
+.gh .br { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gh .why { grid-column: 3 / 5; color: var(--dim); font-size: 13px; overflow-wrap: anywhere; }
+@keyframes blink { 50% { opacity: .35 } }
+.note { color: var(--dim); font-size: 14px; margin-top: 14px; }
+
+/* audit */
+.crit { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
+.crit span { font: 14px var(--mono); padding: 4px 14px; border-radius: 99px; border: 1px solid var(--line); color: var(--dim); }
+.crit span.met { color: var(--good); border-color: color-mix(in srgb, var(--good) 60%, transparent); }
+.round { border-top: 1px solid var(--line); padding: 12px 0; margin-top: 12px; }
+.sevs { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0; }
+.sev { font-size: 12px; padding: 1px 9px; border-radius: 99px; border: 1px solid var(--line); }
+.sev.critical { color: var(--crit); border-color: var(--crit); } .sev.high { color: var(--high); border-color: var(--high); }
+.sev.medium { color: var(--med); border-color: var(--med); } .sev.low { color: var(--low); }
+details summary { cursor: pointer; color: var(--dim); font-size: 13px; }
+.finding { display: grid; grid-template-columns: 70px 90px 1fr; gap: 8px; font-size: 13px; padding: 4px 0; }
+footer { color: var(--faint); font: 12px var(--mono); margin-top: 32px; text-align: center; }
 </style>
 </head>
 <body>
 <div class="wrap">
   <header>
     <h1 id="project">Formal Factory</h1>
-    <span class="badge" id="lang"></span>
-    <span class="badge" id="main"></span>
-    <span class="live"><span class="dot" id="dot"></span><span id="updated">connecting…</span></span>
+    <span class="pill" id="lang"></span>
+    <span class="pill" id="main"></span>
+    <div class="hstats">
+      <span>elapsed <b id="elapsed">–</b></span>
+      <span>spend <b id="spend">–</b><span id="budget"></span></span>
+      <span class="live"><span class="dot" id="dot"></span><span id="updated">connecting…</span></span>
+    </div>
   </header>
 
   <div id="alerts"></div>
 
   <div class="panel">
-    <div class="phases" id="phases"></div>
-    <p class="story" id="story"></p>
+    <div class="stages" id="stages"></div>
+    <div class="storyrow"><div class="story" id="story"></div><div class="next" id="next"></div></div>
   </div>
 
-  <div class="grid cols-5 section" id="stats"></div>
+  <div class="grid cards section" id="cards"></div>
 
-  <div class="grid cols-2 section">
-    <div class="panel"><h2>Speed over time</h2><div id="chart"></div><div class="chart-note" id="chartnote"></div></div>
-    <div class="panel"><h2>Working right now</h2><div id="agents"></div></div>
+  <div class="panel section">
+    <div class="head"><h2 class="ttl">Agent timeline</h2><div class="legend" id="tllegend"></div></div>
+    <div id="timeline"></div>
   </div>
 
-  <div class="grid cols-2 section">
-    <div class="panel"><h2>What happened</h2><div id="events"></div></div>
-    <div>
-      <div class="panel"><h2>Audit</h2><div id="audit"></div></div>
-      <div class="panel section"><h2>Every change through the gate</h2><div class="squares" id="gates"></div>
-        <div class="chart-note" id="gatenote"></div></div>
-      <div class="panel section"><h2>Work items</h2><div class="items" id="backlog"></div></div>
-      <div class="panel section"><h2>Spend by role</h2><div id="cost"></div></div>
+  <div class="grid two section">
+    <div class="panel"><div class="head"><h2 class="ttl" id="agentsttl">Working right now</h2></div><div class="agents" id="agents"></div></div>
+    <div class="panel">
+      <div class="head"><h2 class="ttl" id="contractttl">Contract</h2>
+        <div class="legend"><span><i style="background:var(--panel2)"></i>open</span><span><i style="border:2px solid var(--impl)"></i>proving</span>
+          <span><i style="background:var(--good)"></i>proven</span><span><i style="background:var(--bad)"></i>failed</span></div></div>
+      <div id="contract"></div>
+      <div class="cinfo" id="cinfo">Hover a cell to see the statement.</div>
+    </div>
+  </div>
+
+  <div class="grid two section">
+    <div class="panel"><div class="head"><h2 class="ttl">Speed over time</h2><span class="next" id="speedhead"></span></div><div id="chart"></div></div>
+    <div class="panel"><div class="head"><h2 class="ttl">Spend burn</h2><span class="next" id="burnhead"></span></div><div id="burn"></div><div id="cost"></div></div>
+  </div>
+
+  <div class="grid feed section">
+    <div class="panel">
+      <div class="head"><h2 class="ttl">What happened</h2><div class="chips" id="filters"></div></div>
+      <div id="events"></div>
+    </div>
+    <div class="stack">
+      <div class="panel"><div class="head"><h2 class="ttl">Work items · dependencies</h2></div><div id="flow"></div></div>
+      <div class="panel"><div class="head"><h2 class="ttl">Gate history</h2></div><div id="gates"></div>
+        <div class="note">Rejections show the failing check and whether the change was retried.</div></div>
+      <div class="panel"><div class="head"><h2 class="ttl" id="auditttl">Audit</h2></div><div id="audit"></div></div>
     </div>
   </div>
 
@@ -140,162 +247,397 @@ footer { color: var(--dim); font-size: 12px; margin-top: 28px; text-align: cente
 <script>
 const $ = id => document.getElementById(id);
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const store = { get(k, d) { try { return localStorage.getItem(k) ?? d; } catch (e) { return d; } },
+                set(k, v) { try { localStorage.setItem(k, v); } catch (e) {} } };
 function ago(ts, now) {
   if (!ts) return "";
-  const s = Math.max(0, (now || Date.now() / 1000) - ts);
+  const s = Math.max(0, now - ts);
   if (s < 60) return Math.round(s) + "s ago";
   if (s < 3600) return Math.round(s / 60) + " min ago";
   if (s < 86400) return (s / 3600).toFixed(s < 36000 ? 1 : 0) + " h ago";
   return (s / 86400).toFixed(1) + " days ago";
 }
-function dur(s) {
-  s = Math.max(0, s);
-  if (s < 3600) return Math.round(s / 60) + " min";
-  if (s < 86400) return (s / 3600).toFixed(1) + " h";
-  return (s / 86400).toFixed(1) + " days";
+function clock(s) {
+  s = Math.max(0, Math.round(s));
+  const d = Math.floor(s / 86400), h = Math.floor(s % 86400 / 3600), m = Math.floor(s % 3600 / 60), x = s % 60;
+  if (d) return `${d}d ${h}h`;
+  const p = n => String(n).padStart(2, "0");
+  return h ? `${h}:${p(m)}:${p(x)}` : `${m}:${p(x)}`;
 }
-const fmtn = v => v == null ? "–" : (v >= 100 ? v.toFixed(0) : v >= 10 ? v.toFixed(1) : v.toFixed(2));
+const secs = s => s == null ? "–" : s < 90 ? Math.round(s) + "s" : clock(s);
+const money = v => v == null ? "–" : "$" + (v >= 1000 ? Math.round(v).toLocaleString() : v.toFixed(2));
+const kfmt = n => n >= 1e6 ? (n / 1e6).toFixed(1) + "M" : n >= 1e3 ? Math.round(n / 1e3) + "k" : String(n);
+const num = v => v == null ? "–" : v >= 100 ? v.toFixed(0) : v >= 10 ? v.toFixed(1) : v.toFixed(2);
 let UNIT = "";
-const fmtx = v => v == null ? "–" : fmtn(v) + UNIT;
+const fx = v => v == null ? "–" : num(v) + UNIT;
+const LOOPC = { specify: "var(--spec)", implement: "var(--impl)", optimize: "var(--opt)", audit: "var(--aud)", done: "var(--good)" };
+const loopOf = r => r.loop === "specify" || r.loop === "implement" || r.loop === "optimize" ? r.loop : r.loop ? "audit" : "other";
+const colorOf = l => LOOPC[l] || "var(--gate)";
 
-const PHASE_TEXT = {
-  specify: "Agents are writing the specification. A human approves it before anything is built against it.",
-  implement: "Agents are writing the program and proving each law of the contract.",
-  optimize: "Everything is proved. Agents are now making it faster, one proved change at a time.",
-  audit: "Proved and fast enough. Fresh auditors are trying to break it; real problems get fixed.",
-  done: "Finished: fully proved, fast enough, and the auditors ran out of serious findings.",
-  idle: "Idle.",
-};
+let ST = null, FILTER = store.get("ff.filter", "all"), HOVER = null, MORE = false;
+const OPEN = new Set();
 
 function render(st) {
-  const now = st.now;
-  UNIT = st.benchmark.unit || "";
+  ST = st;
+  const now = st.now, b = st.benchmark;
+  UNIT = b.unit || "";
   document.title = st.project + " · Formal Factory";
   $("project").textContent = st.project;
   $("lang").textContent = st.language;
-  $("main").innerHTML = st.github ? `<a style="color:inherit" href="https://github.com/${esc(st.github)}">${esc(st.github)}</a> · main ${esc(st.main)}` : "main " + esc(st.main);
+  $("main").innerHTML = (st.github ? `<a href="https://github.com/${esc(st.github)}">${esc(st.github)}</a> · ` : "") + `main <b>${esc(st.main)}</b>`;
+  $("elapsed").textContent = st.started ? clock(now - st.started) : "–";
+  $("spend").textContent = money(st.cost.total);
+  $("budget").innerHTML = st.cost.budget ? ` <span class="faint">/ ${money(st.cost.budget)}</span>` : "";
 
-  // alerts
   let al = "";
   for (const d of st.decisions) al += `<div class="panel alert">⏸ Waiting for a human: ${esc(d.question)}</div>`;
   if (st.paused.length) al += `<div class="panel alert">Paused: ${esc(st.paused.join(", "))}</div>`;
   $("alerts").innerHTML = al;
 
-  // phases
-  const idx = st.phases.indexOf(st.phase);
-  const sub = { specify: () => { const s = st.backlog.filter(b => b.loop === "specify"), d = s.filter(b => b.status === "done").length; return s.length ? `${d}/${s.length} parts` : ""; },
-                implement: () => { const s = st.backlog.filter(b => b.loop !== "specify"), d = s.filter(b => b.status === "done").length; return s.length ? `${d}/${s.length} items` : ""; },
-                optimize: () => st.benchmark.target != null ? `target ${fmtx(st.benchmark.target)}` : "",
-                audit: () => st.audit.rounds.length ? `${st.audit.rounds.length} round${st.audit.rounds.length > 1 ? "s" : ""}` : "",
-                done: () => "" };
-  $("phases").innerHTML = st.phases.map((p, i) =>
-    `<div class="phase ${i < idx || st.phase === "done" ? "done" : i === idx ? "now" : ""}">${i < idx || (st.phase === "done") ? "✓ " : ""}${p}<small>${esc((sub[p] || (() => ""))())}</small></div>`).join("");
-  let story = PHASE_TEXT[st.phase] || "";
-  if (st.phase === "audit" && st.audit.waiting) story += ` (Waiting for: ${esc(st.audit.waiting)}.)`;
-  $("story").innerHTML = story;
-
-  // stats
-  const b = st.benchmark, gc = st.gate_counts;
-  const impl = st.backlog.filter(x => x.loop !== "specify");
-  const doneItems = impl.filter(x => x.status === "done").length;
-  const rounds = st.audit.rounds, allF = rounds.flatMap(r => r.findings);
-  const fixed = allF.filter(f => f.status === "fixed").length, documented = allF.filter(f => f.status === "documented").length;
-  let speedCard = `<div class="big">${fmtx(b.current)}</div><div class="sub">current benchmark`;
-  if (b.target != null) speedCard += ` · target ${fmtx(b.target)} ${b.at_target ? '<span class="good">✓ met</span>' : ""}`;
-  speedCard += `</div>`;
-  if (b.target != null && b.current != null) {
-    const first = b.series.length ? b.series[0].value : b.current;
-    const pct = b.direction === "lower" ? Math.min(100, Math.max(0, (first - b.current) / Math.max(1e-9, first - b.target) * 100))
-                                        : Math.min(100, b.current / b.target * 100);
-    speedCard += `<div class="bar"><i style="width:${b.at_target ? 100 : pct}%;background:${b.at_target ? "var(--good)" : "var(--accent)"}"></i></div>`;
-  }
-  const cards = [
-    ["Proofs", `<div class="big">${doneItems}/${impl.length || 0}</div><div class="sub">contract items done</div>
-      <div class="bar"><i style="width:${impl.length ? doneItems / impl.length * 100 : 0}%;background:var(--good)"></i></div>`],
-    ["Speed", speedCard],
-    ["Gate", `<div class="big"><span class="good">${gc.green || 0}</span> <span class="dim" style="font-size:18px">merged</span></div>
-      <div class="sub">${gc.red || 0} rejected${gc.running ? ` · ${gc.running} checking now` : ""}</div>`],
-    ["Audit", `<div class="big">${rounds.length}</div><div class="sub">round${rounds.length === 1 ? "" : "s"} · ${allF.length} findings · ${fixed} fixed · ${documented} not reachable</div>`],
-    ["Spend", `<div class="big">$${Math.round(st.cost.total).toLocaleString()}</div><div class="sub">${st.started ? "over " + dur(now - st.started) : ""}</div>`],
-  ];
-  $("stats").innerHTML = cards.map(([t, h]) => `<div class="panel stat"><h2>${t}</h2>${h}</div>`).join("");
-
-  // chart
-  drawChart(b);
-
-  // agents
-  $("agents").innerHTML = st.running.length ? st.running.map(a => `
-    <div class="agent"><b>${esc(a.doing)}</b>${a.subagent ? ' <span class="badge">subagent</span>' : ""}
-      <span class="t"> · for ${dur(now - a.since)}</span>
-      <div class="t">${esc(a.task)}</div>
-      ${a.note ? `<div class="note">${esc(a.note)}</div>` : ""}</div>`).join("")
-    : `<div class="empty">${st.phase === "done" ? "Nothing left to do." : "No agent is running right now."}</div>`;
-
-  // events
-  const cls = k => ["gate-green", "experiment-kept", "fixed", "item-done", "target-reached", "audit-done"].includes(k) ? "good"
-    : ["gate-red", "fix-failed", "error", "launch-error", "item-blocked", "accounts-exhausted", "target-lost"].includes(k) ? "bad" : "acc";
-  $("events").innerHTML = st.events.slice(0, 40).map(e =>
-    `<div class="ev"><div class="when">${ago(e.ts, now)}</div><div><span class="lbl ${cls(e.kind)}">${esc(e.label)}</span><span class="txt">${esc(e.text)}</span></div></div>`).join("")
-    || `<div class="empty">Nothing yet.</div>`;
-
-  // audit
-  const SEV = ["critical", "high", "medium", "low"];
-  let au = rounds.length ? "" : `<div class="empty">${st.audit.waiting ? "Starts once " + esc(st.audit.waiting) : "Not started."}</div>`;
-  for (const r of rounds.slice().reverse()) {
-    const counts = SEV.map(s => [s, r.findings.filter(f => f.severity === s).length]).filter(([, n]) => n);
-    const st2 = r.status === "done" ? `<span class="good">done</span>` : `<span class="warn">${esc(r.status)}</span>`;
-    au += `<div class="round"><b>Round ${r.n}</b> · ${st2} <span class="dim">· ${r.findings.length} findings</span>
-      <div class="chips">${counts.map(([s, n]) => `<span class="chip ${s}">${n} ${s}</span>`).join("")}</div>
-      <details><summary>show findings</summary>${r.findings.map(f =>
-        `<div class="finding"><span class="sev ${f.severity}">${esc(f.severity)}</span><span class="dim">${esc(f.status)}</span><span>${esc(f.title)}</span></div>`).join("")}</details></div>`;
-  }
-  if (st.audit.converged) au = `<p class="good" style="margin-top:0">✓ Converged after round ${esc(st.audit.converged)}: nothing reachable at ${esc(st.audit.converge_at)} or worse.</p>` + au;
-  $("audit").innerHTML = au;
-
-  // gates
-  $("gates").innerHTML = st.gates.slice().reverse().map(g =>
-    `<div class="sq ${g.status === "green" ? "" : g.status === "red" ? "red" : "running"}" title="#${g.id} ${esc(g.status)} · ${esc(g.who)}${g.reason ? " · " + esc(g.reason) : ""}"></div>`).join("");
-  const lastGreen = st.gates.find(g => g.status === "green");
-  $("gatenote").textContent = lastGreen ? `last merge ${ago(lastGreen.ended, now)} · red squares are changes the gate refused (most are re-tried and merged later)` : "";
-
-  // backlog
-  $("backlog").innerHTML = st.backlog.map(i => `<span class="item ${esc(i.status)}" title="${esc(i.status)}">${esc(i.item.replace(/^law:/, ""))}</span>`).join("")
-    || `<span class="empty">none</span>`;
-
-  // cost
-  const max = Math.max(1, ...Object.values(st.cost.by_role));
-  $("cost").innerHTML = Object.entries(st.cost.by_role).filter(([, v]) => v > 0).map(([k, v]) =>
-    `<div class="costrow"><span>${esc(k.replace(/_/g, " "))}</span><div class="bar"><i style="width:${v / max * 100}%"></i></div><span class="dim">$${Math.round(v)}</span></div>`).join("");
+  renderStages(st); renderCards(st); renderTimeline(st); renderAgents(st); renderContract(st);
+  renderSpeed(st); renderBurn(st); renderEvents(st); renderFlow(st); renderGates(st); renderAudit(st);
 }
 
-function drawChart(b) {
-  const pts = b.series;
-  if (pts.length < 2) { $("chart").innerHTML = `<div class="empty">No measurements yet.</div>`; $("chartnote").textContent = ""; return; }
-  const W = 640, H = 240, L = 44, R = 12, T = 12, B = 26;
-  const t0 = pts[0].ts, t1 = pts[pts.length - 1].ts;
-  const vals = pts.map(p => p.value).concat(b.target != null ? [b.target] : []);
-  const useLog = Math.max(...vals) / Math.max(1e-9, Math.min(...vals)) > 20;
+// ------------------------------------------------------------------------------------ stages
+function stageInfo(st) {
+  const items = st.backlog.filter(x => !x.item.startsWith("brief: "));
+  const spec = items.filter(x => x.loop === "specify"), impl = items.filter(x => x.loop === "implement");
+  const done = xs => xs.filter(x => x.status === "done").length;
+  const frozenN = st.contract.filter(c => c.state !== "open").length, total = st.contract.length;
+  const b = st.benchmark, rounds = st.audit.rounds;
+  const fixed = rounds.flatMap(r => r.findings).filter(f => f.status === "fixed").length;
+  let optPct = 0;
+  if (b.target != null && b.current != null) {
+    const first = b.series.length ? b.series[0].value : b.current;
+    optPct = b.at_target ? 1 : b.direction === "lower" ? Math.max(0, Math.min(1, (first - b.current) / Math.max(1e-9, first - b.target)))
+                                                     : Math.min(1, b.current / b.target);
+  }
+  return {
+    specify: { sub: spec.length ? `${done(spec)}/${spec.length} parts · ${st.approval && frozenN ? frozenN + " statements frozen" : total + " statements drafted"}` : `${total} statements drafted`,
+               pct: spec.length ? done(spec) / spec.length : 0 },
+    implement: { sub: `${done(impl)}/${impl.length} items · ${st.proving}/${total} proving`, pct: impl.length ? done(impl) / impl.length : 0 },
+    optimize: { sub: b.target != null ? `target ${fx(b.target)}${st.versus ? " vs " + st.versus : ""}` : "no target", pct: optPct },
+    audit: { sub: rounds.length ? `round ${rounds.length}/${st.max_rounds} · ↺ ${fixed} loop-back${fixed === 1 ? "" : "s"} to implement`
+                                : `↺ ${fixed} loop-backs to implement`, pct: st.audit.converged ? 1 : rounds.length / Math.max(1, st.max_rounds) },
+    done: { sub: "", pct: st.phase === "done" ? 1 : 0 },
+    counts: { spec, impl, total },
+  };
+}
+const STORY = {
+  specify: "Agents are writing the specification.",
+  implement: "Agents are writing the program and proving each law of the contract.",
+  optimize: "Everything is proved. Agents are making it faster, one proved change at a time.",
+  audit: "Proved and fast enough. Fresh auditors are trying to break it; real problems get fixed.",
+  done: "Finished: fully proved, fast enough, and the auditors ran out of serious findings.",
+  idle: "Idle.",
+};
+function renderStages(st) {
+  const info = stageInfo(st), idx = st.phases.indexOf(st.phase), now = st.now;
+  $("stages").style.setProperty("--n", st.phases.length);
+  $("stages").innerHTML = st.phases.map((p, i) => {
+    const isDone = i < idx || st.phase === "done", isNow = i === idx && st.phase !== "done";
+    const t = st.times[p] || [null, null];
+    const time = t[0] ? clock((t[1] || now) - t[0]) : "–";
+    const pct = isDone ? 1 : isNow ? Math.max(0.04, info[p].pct || 0) : 0;
+    const col = isDone ? "var(--good)" : colorOf(p);
+    const nameCol = isDone ? "var(--good)" : isNow ? colorOf(p) : "var(--dim)";
+    return `<div class="stage"><div class="sbar"><i style="width:${pct * 100}%;background:${col}"></i></div>
+      <div class="sname"><span style="color:${nameCol}">${isDone ? "✓ " : ""}${p[0].toUpperCase() + p.slice(1)}</span><span>${p === "done" ? "" : time}</span></div>
+      <div class="ssub">${esc(info[p].sub)}</div></div>`;
+  }).join("");
+  $("story").textContent = STORY[st.phase] || "";
+  const open = n => `${n} open`;
+  const nextOf = {
+    specify: () => `next gate → <b>implement</b> when ${st.approval === "auto" ? "the spec backlog is empty" : "a human approves it"} (${open(info.counts.spec.filter(x => x.status !== "done").length)})`,
+    implement: () => `next gate → <b>${st.phases.includes("optimize") ? "optimize" : "audit"}</b> when the implement backlog is empty (${open(info.counts.impl.filter(x => x.status !== "done").length)})`,
+    optimize: () => `next gate → <b>audit</b> when main measures ${st.benchmark.direction === "lower" ? "≤" : "≥"} ${fx(st.benchmark.target)} (now ${fx(st.benchmark.current)})`,
+    audit: () => `next gate → <b>done</b> when a round finds nothing reachable at ${esc(st.audit.converge_at)} or worse`,
+  };
+  $("next").innerHTML = nextOf[st.phase] ? nextOf[st.phase]() : "";
+}
+
+// ------------------------------------------------------------------------------------ cards
+function renderCards(st) {
+  const info = stageInfo(st), b = st.benchmark, gc = st.gate_counts, now = st.now;
+  const items = info.counts.spec.concat(info.counts.impl);
+  const d = items.filter(x => x.status === "done").length;
+  const segs = items.map(x => `<i style="flex:1;background:${x.status === "done" ? colorOf(x.loop) : x.status === "running" ? "color-mix(in srgb, " + colorOf(x.loop) + " 45%, var(--line))" : x.status === "blocked" ? "var(--bad)" : "var(--line)"}"></i>`).join("") || `<i style="flex:1;background:var(--line)"></i>`;
+  const merged = gc.green || 0, red = gc.red || 0, fin = merged + red;
+  const elapsedMin = st.started ? (now - st.started) / 60 : 0;
+  const budget = st.cost.budget;
+  const cards = [
+    ["Proofs", `<div class="big">${st.laws_proven}<span class="of">/${st.laws}</span></div>
+      <div class="sub">laws proven · ${st.proving} statement${st.proving === 1 ? "" : "s"} in progress</div>
+      <div class="bar solid"><i style="width:${st.laws ? st.laws_proven / st.laws * 100 : 0}%;background:var(--impl)"></i></div>`],
+    ["Items", `<div class="big">${d}<span class="of">/${items.length}</span></div>
+      <div class="sub">spec ${info.counts.spec.filter(x => x.status === "done").length}/${info.counts.spec.length} · impl ${info.counts.impl.filter(x => x.status === "done").length}/${info.counts.impl.length}</div>
+      <div class="bar">${segs}</div>`],
+    ["Speed", `<div class="big">${b.current == null ? '<span class="faint">—</span>' : num(b.current)}<span class="unit"> / ${fx(b.target)}</span></div>
+      <div class="sub">${st.versus ? "vs " + esc(st.versus) + " · " : ""}${b.current == null ? "no benchmark yet" : `${b.kept}/${b.experiments} experiments kept${b.at_target ? ' · <span class="good">✓ met</span>' : ""}`}</div>`],
+    ["Gate", `<div class="big"><span class="good">${merged}</span> <small>merged</small></div>
+      <div class="sub">${red} rejected · ${fin ? Math.round(merged / fin * 100) : 100}% pass · avg ${secs(st.gate_avg)}${gc.running ? ` · ${gc.running} checking` : ""}</div>`],
+    ["Spend", `<div class="big">${money(st.cost.total)}</div>
+      <div class="sub">${elapsedMin > 1 ? money(st.cost.total / elapsedMin) + "/min" : "–"}${budget ? ` · ${Math.round(st.cost.total / budget * 100)}% of budget` : ""}</div>
+      ${budget ? `<div class="bar solid"><i style="width:${Math.min(100, st.cost.total / budget * 100)}%;background:${st.cost.total > budget ? "var(--bad)" : "var(--aud)"}"></i></div>` : ""}`],
+  ];
+  $("cards").innerHTML = cards.map(([t, h]) => `<div class="panel card"><h2 class="ttl">${t}</h2>${h}</div>`).join("");
+}
+
+// ------------------------------------------------------------------------------------ timeline
+function niceStep(span) {
+  const steps = [60, 120, 300, 600, 900, 1800, 3600, 7200, 14400, 21600, 43200, 86400, 172800, 604800];
+  const most = window.innerWidth < 700 ? 4 : 8;
+  return steps.find(s => span / s <= most) || steps[steps.length - 1];
+}
+function axisLabel(s) {
+  if (s < 3600) return Math.round(s / 60) + "m";
+  if (s < 86400) return (s / 3600).toFixed(s % 3600 ? 1 : 0) + "h";
+  return (s / 86400).toFixed(s % 86400 ? 1 : 0) + "d";
+}
+function renderTimeline(st) {
+  const t0 = st.t_start, t1 = Math.max(st.now, t0 + 60), span = t1 - t0;
+  const pos = t => Math.max(0, Math.min(100, (t - t0) / span * 100));
+  const lanes = new Map();
+  for (const r of st.timeline) {
+    const key = (r.subagent ? "↳ " : "") + r.lane;
+    if (!lanes.has(key)) lanes.set(key, { key, sub: r.subagent, runs: [], first: r.start, last: r.end || st.now });
+    const L = lanes.get(key); L.runs.push(r); L.last = Math.max(L.last, r.end || st.now);
+  }
+  let ls = [...lanes.values()];
+  if (ls.length > 14) ls = ls.sort((a, b) => b.last - a.last).slice(0, 14);
+  ls.sort((a, b) => a.first - b.first);
+  const laneOfRun = new Map();
+  ls.forEach(L => L.runs.forEach(r => laneOfRun.set(r.id, L.key)));
+  const loops = new Set();
+  let h = "";
+  for (const L of ls) {
+    let segs = "";
+    for (const r of L.runs) {
+      const l = loopOf(r); loops.add(l);
+      const a = pos(r.start), z = pos(r.end || st.now);
+      const label = r.lane.includes("·") ? r.lane.split("·").slice(1).join("·") : r.role;
+      const lbl = (r.loop === "specify" || r.loop === "implement") && label ? (r.loop === "specify" ? "spec-" : "impl-") + label : label;
+      segs += `<div class="seg ${r.end ? "" : "running"} ${r.status === "failed" ? "failed" : ""}" style="left:${a}%;width:${Math.max(0.3, z - a)}%;background:${colorOf(l)}" title="${esc(r.role)} · ${esc(r.status)} · ${clock((r.end || st.now) - r.start)}">${esc(lbl)}</div>`;
+    }
+    for (const m of st.merges) if (laneOfRun.get(m.run) === L.key) segs += `<div class="tick" style="left:${pos(m.ts)}%" title="merged"></div>`;
+    h += `<div class="lab ${L.sub ? "sub" : ""}" title="${esc(L.key)}">${esc(L.key)}</div><div class="track">${segs}</div>`;
+  }
+  let gs = "";
+  for (const g of st.gate_spans) {
+    if (!g.start) continue;
+    const a = pos(g.start), z = pos(g.end || st.now);
+    gs += `<div class="seg gate ${g.status === "red" ? "red" : g.status === "running" ? "running" : ""}" style="left:${a}%;width:${Math.max(0.3, z - a)}%"></div>`;
+  }
+  h += `<div class="lab">gate</div><div class="track">${gs}</div>`;
+  const step = niceStep(span);
+  let ax = "";
+  for (let s = 0; s <= span + 1; s += step) ax += `<span style="left:${s / span * 100}%">${axisLabel(s)}</span>`;
+  h += `<div></div><div class="axis">${ax}</div>`;
+  $("timeline").innerHTML = ls.length || st.gate_spans.length ? `<div class="tl">${h}</div>` : `<div class="empty">No agent has run yet.</div>`;
+  const names = { specify: "specify", implement: "implement", optimize: "optimize", audit: "audit" };
+  $("tllegend").innerHTML = [...loops].filter(l => names[l]).map(l => `<span><i style="background:${colorOf(l)}"></i>${names[l]}</span>`).join("")
+    + `<span><i style="width:2px;background:var(--text)"></i>merge</span>`;
+}
+
+// ------------------------------------------------------------------------------------ agents
+function renderAgents(st) {
+  const now = st.now, rs = st.running.filter(a => !a.subagent);
+  $("agentsttl").textContent = `Working right now · ${st.running.length} agent${st.running.length === 1 ? "" : "s"}`;
+  $("agents").innerHTML = st.running.length ? st.running.map(a => {
+    const l = loopOf(a);
+    const log = a.activity && a.activity.length ? `<div class="log">${a.activity.map(esc).join("\n")}</div>`
+      : a.note ? `<div class="log note">${esc(a.note)}</div>`
+      : `<div class="log">${st.details ? "starting…" : "no notes yet · live actions are shown only on a private page"}</div>`;
+    return `<div class="agent"><div class="top"><span class="name">${esc((a.subagent ? "↳ " : "") + a.lane)}</span>
+        ${a.item ? `<span class="tag ${l}">${esc(a.item)}</span>` : ""}<span class="clock">${clock(now - a.since)}</span></div>
+      <div class="task">${esc(a.task)}</div>${log}
+      <div class="meta">${a.attempt ? `<span>attempt <b>${a.attempt}</b></span>` : ""}<span>tokens <b>${a.tokens ? kfmt(a.tokens) : "–"}</b></span>
+        <span>cost <b>${a.cost != null ? money(a.cost) : "–"}</b></span><span>proving <b>${a.touching}</b> statement${a.touching === 1 ? "" : "s"}</span></div></div>`;
+  }).join("") : `<div class="empty">${st.phase === "done" ? "Nothing left to do." : "No agent is running right now."}</div>`;
+}
+
+// ------------------------------------------------------------------------------------ contract
+function renderContract(st) {
+  const locked = st.contract.filter(c => c.state !== "open").length;
+  $("contractttl").textContent = `Contract · ${st.contract.length} ${locked ? "frozen" : "draft"} statement${st.contract.length === 1 ? "" : "s"}`;
+  const files = new Map();
+  st.contract.forEach((c, i) => { if (!files.has(c.file)) files.set(c.file, []); files.get(c.file).push([c, i]); });
+  $("contract").innerHTML = [...files].map(([f, cs]) => {
+    const pv = cs.filter(([c]) => c.state === "proven").length, pg = cs.filter(([c]) => c.state === "proving").length;
+    const fl = cs.filter(([c]) => c.state === "failed").length;
+    return `<div class="file"><div class="fh"><span>${esc(f)}</span><span>${pv}/${cs.length} proven${pg ? ` · ${pg} proving` : ""}${fl ? ` · <span class="bad">${fl} failed</span>` : ""}</span></div>
+      <div class="cells">${cs.map(([c, i]) => `<div class="cell ${c.state} ${HOVER === c.name ? "on" : ""}" data-i="${i}" tabindex="0" aria-label="${esc(c.name)}: ${c.state}"></div>`).join("")}</div></div>`;
+  }).join("") || `<div class="empty">No frozen statements on main yet.</div>`;
+  showCell(st.contract.find(c => c.name === HOVER));
+}
+function showCell(c) {
+  if (!c) { $("cinfo").textContent = "Hover a cell to see the statement."; return; }
+  const what = { law: "law", theorem: "theorem", lemma: "lemma", def: "definition", type: "type", structure: "structure",
+                 inductive: "type", abbrev: "definition", instance: "instance" }[c.kind] || c.kind;
+  const state = c.state === "proven" ? (["law", "theorem", "lemma"].includes(c.kind) ? "proven" : "frozen, checked") : c.state;
+  $("cinfo").innerHTML = `<b style="color:var(--text)">${esc(c.name)}</b> · ${esc(what)} · ${esc(state)} <span class="faint">· ${esc(c.file)}</span>`
+    + (c.text ? `<pre>${esc(c.text)}</pre>` : "");
+}
+document.addEventListener("mouseover", e => {
+  const el = e.target.closest && e.target.closest(".cell");
+  if (!el || !ST) return;
+  const c = ST.contract[+el.dataset.i]; HOVER = c.name;
+  document.querySelectorAll(".cell.on").forEach(x => x.classList.remove("on")); el.classList.add("on"); showCell(c);
+});
+document.addEventListener("focusin", e => { if (e.target.classList && e.target.classList.contains("cell")) e.target.dispatchEvent(new MouseEvent("mouseover", { bubbles: true })); });
+
+// ------------------------------------------------------------------------------------ speed
+function renderSpeed(st) {
+  const b = st.benchmark, pts = b.series.filter(p => p.kind === "main" || p.kind === "kept");
+  const W = 640, H = 240, L = 50, R = 14, T = 16, B = 30;
+  const vals = pts.map(p => p.value).concat(b.target != null ? [b.target] : []).concat(UNIT === "×" ? [1] : []);
+  const useLog = vals.length && Math.max(...vals) / Math.max(1e-9, Math.min(...vals)) > 20;
   const f = v => useLog ? Math.log10(v) : v;
-  let lo = Math.min(...vals.map(f)), hi = Math.max(...vals.map(f));
+  let lo = vals.length ? Math.min(...vals.map(f)) : 0, hi = vals.length ? Math.max(...vals.map(f)) : 1;
+  if (!useLog && UNIT === "×") { lo = Math.min(lo, 0.5); hi = Math.max(hi, (b.target || 1) * 1.33); }
   if (hi - lo < 1e-9) { hi += 1; lo -= 1; }
-  const x = t => L + (t - t0) / Math.max(1, t1 - t0) * (W - L - R);
+  const pad = (hi - lo) * 0.06; hi += pad; lo -= useLog ? pad : 0;
   const y = v => T + (hi - f(v)) / (hi - lo) * (H - T - B);
-  let line = "", last = null;
-  for (const p of pts) { line += (line ? " L" : "M") + x(p.ts).toFixed(1) + " " + y(p.value).toFixed(1); last = p; }
+  const x = i => L + (pts.length < 2 ? 0.5 : i / (pts.length - 1)) * (W - L - R);
+  let svg = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="benchmark per commit on main">`;
   const ticks = [];
-  for (let i = 0; i <= 4; i++) { const fv = lo + (hi - lo) * i / 4; ticks.push(useLog ? Math.pow(10, fv) : fv); }
-  let svg = `<svg viewBox="0 0 ${W} ${H}" width="100%" role="img" aria-label="benchmark over time">`;
-  for (const tv of ticks) svg += `<line x1="${L}" x2="${W - R}" y1="${y(tv)}" y2="${y(tv)}" stroke="var(--line)" stroke-width="1"/><text x="${L - 6}" y="${y(tv) + 4}" text-anchor="end">${fmtx(tv)}</text>`;
-  if (b.target != null) svg += `<line x1="${L}" x2="${W - R}" y1="${y(b.target)}" y2="${y(b.target)}" stroke="var(--good)" stroke-dasharray="5 4" stroke-width="1.5"/><text x="${W - R}" y="${y(b.target) - 5}" text-anchor="end" style="fill:var(--good)">target ${fmtx(b.target)}</text>`;
-  svg += `<path d="${line}" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linejoin="round"/>`;
-  for (const p of pts) if (p.kind === "kept") svg += `<circle cx="${x(p.ts)}" cy="${y(p.value)}" r="3.5" fill="var(--accent)"><title>${esc(fmtx(p.value))} · ${esc(p.note || "")}</title></circle>`;
-  svg += `<circle cx="${x(last.ts)}" cy="${y(last.value)}" r="5" fill="var(--good)"/>`;
-  const d0 = new Date(t0 * 1000), d1 = new Date(t1 * 1000);
-  const fd = d => d.toLocaleDateString(undefined, { month: "short", day: "numeric" }) + " " + d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
-  svg += `<text x="${L}" y="${H - 6}">${fd(d0)}</text><text x="${W - R}" y="${H - 6}" text-anchor="end">${fd(d1)}</text></svg>`;
+  for (let i = 0; i <= 3; i++) { const fv = lo + (hi - lo) * i / 3; ticks.push(useLog ? Math.pow(10, fv) : fv); }
+  for (const tv of ticks) svg += `<line x1="${L}" x2="${W - R}" y1="${y(tv)}" y2="${y(tv)}" stroke="var(--line)"/><text x="${L - 8}" y="${y(tv) + 4}" text-anchor="end">${fx(tv)}</text>`;
+  if (UNIT === "×") svg += `<line x1="${L}" x2="${W - R}" y1="${y(1)}" y2="${y(1)}" stroke="var(--dim)" stroke-width="1.2"/><text x="${W - R}" y="${y(1) - 6}" text-anchor="end">${esc((st.versus ? st.versus.split(" ")[0] : "") + " baseline")}</text>`;
+  if (b.target != null) svg += `<line x1="${L}" x2="${W - R}" y1="${y(b.target)}" y2="${y(b.target)}" stroke="var(--good)" stroke-dasharray="6 5" stroke-width="1.5"/><text x="${W - R}" y="${y(b.target) - 7}" text-anchor="end" style="fill:var(--good)">target ${fx(b.target)}</text>`;
+  if (pts.length) {
+    let line = "";
+    pts.forEach((p, i) => line += (i ? " L" : "M") + x(i).toFixed(1) + " " + y(p.value).toFixed(1));
+    svg += `<path d="${line}" fill="none" stroke="var(--opt)" stroke-width="2" stroke-linejoin="round"/>`;
+    pts.forEach((p, i) => svg += `<circle cx="${x(i)}" cy="${y(p.value)}" r="${i === pts.length - 1 ? 5 : 3.5}" fill="${i === pts.length - 1 ? "var(--good)" : "var(--opt)"}"><title>${esc(fx(p.value))}${p.note ? " · " + esc(p.note) : ""}</title></circle>`);
+  } else {
+    svg += `<text x="${(L + W - R) / 2}" y="${(T + H - B) / 2 + 4}" text-anchor="middle" style="font-style:italic;font-family:var(--sans);font-size:14px">${["specify", "implement"].includes(st.phase) ? "first benchmark runs when implement closes" : "no measurements yet"}</text>`;
+  }
+  svg += `<text x="${L}" y="${H - 6}">commits on main →</text></svg>`;
   $("chart").innerHTML = svg;
-  $("chartnote").textContent = `benchmark, ${b.direction} is better${useLog ? " (log scale)" : ""} · ` +
-    `${b.kept} of ${b.experiments} optimization experiments kept` + (b.references.length ? ` · reference: ${b.references.join(", ")}` : "");
+  $("speedhead").innerHTML = b.current != null ? `now <b>${fx(b.current)}</b>${b.direction === "lower" ? ", lower is better" : ""}` : "";
+}
+
+// ------------------------------------------------------------------------------------ spend
+function renderBurn(st) {
+  const now = st.now, t0 = st.t_start, c = st.cost, budget = c.budget;
+  const pts = [{ ts: t0, total: 0 }].concat(c.burn).concat([{ ts: now, total: c.total }]);
+  const hour = c.burn.filter(p => p.ts > now - 3600);
+  const before = c.burn.filter(p => p.ts <= now - 3600).slice(-1)[0];
+  const rate = now - t0 > 600 ? (hour.length ? (c.total - (before ? before.total : 0)) / Math.min(3600, now - t0) : c.total / (now - t0)) : 0;
+  const ahead = Math.max(600, (now - t0) * 0.25), proj = c.total + rate * ahead;
+  const t1 = now + ahead, W = 640, H = 200, L = 6, R = 6, T = 26, B = 8;
+  const top = Math.max(budget || 0, proj, c.total, 1) * 1.08;
+  const x = t => L + (t - t0) / Math.max(1, t1 - t0) * (W - L - R), y = v => T + (1 - v / top) * (H - T - B);
+  let path = "";
+  pts.forEach((p, i) => path += (i ? " L" : "M") + x(p.ts).toFixed(1) + " " + y(p.total).toFixed(1));
+  let svg = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="cumulative spend">`;
+  if (budget) svg += `<line x1="${L}" x2="${W - R}" y1="${y(budget)}" y2="${y(budget)}" stroke="var(--bad)" stroke-dasharray="6 5"/><text x="${W - R}" y="${y(budget) + 16}" text-anchor="end" style="fill:var(--bad)">budget ${money(budget)}</text>`;
+  svg += `<path d="${path} L${x(now).toFixed(1)} ${y(0)} L${x(t0)} ${y(0)} Z" fill="color-mix(in srgb, var(--aud) 14%, transparent)"/>`;
+  svg += `<path d="${path}" fill="none" stroke="var(--aud)" stroke-width="2.2" stroke-linejoin="round"/>`;
+  if (rate > 0) svg += `<line x1="${x(now)}" y1="${y(c.total)}" x2="${x(t1)}" y2="${y(proj)}" stroke="var(--aud)" stroke-dasharray="4 4" opacity=".7"/>`;
+  svg += `<line x1="${L}" x2="${W - R}" y1="${y(0)}" y2="${y(0)}" stroke="var(--line)"/></svg>`;
+  $("burn").innerHTML = svg;
+  $("burnhead").innerHTML = rate > 0 ? `projected <b class="warn">${money(proj)}</b> at ${clock(t1 - (st.started || t0))}` : "";
+  const by = Object.entries(c.by_lane || {}).filter(([, v]) => v > 0);
+  const rows = by.slice(0, 6); if (by.length > 6) rows.push(["others", by.slice(6).reduce((s, [, v]) => s + v, 0)]);
+  const max = Math.max(1e-9, ...rows.map(([, v]) => v));
+  $("cost").innerHTML = rows.map(([k, v]) => `<div class="costrow"><span>${esc(k)}</span><div class="bar solid"><i style="width:${v / max * 100}%;background:var(--aud)"></i></div><span>${money(v)}</span></div>`).join("")
+    || `<div class="empty">No agent has finished yet (cost is known when a run ends).</div>`;
+}
+
+// ------------------------------------------------------------------------------------ events
+const CAT = { gate: ["gate-green", "gate-red", "push-failed"],
+  items: ["item-done", "item-blocked", "experiment-kept", "experiment-reverted", "target-reached", "target-lost", "fixed",
+          "fix-failed", "fix-nochange", "findings", "round-start", "round-end", "round-resume", "audit-done"],
+  spec: ["spec-approved", "frozen", "spec-declined"],
+  agents: ["agent-start", "agent-end", "launch-error", "accounts-exhausted", "error", "loop-start", "decision", "decided"] };
+const kcls = k => ["gate-green", "experiment-kept", "fixed", "item-done", "target-reached", "audit-done"].includes(k) ? "k-good"
+  : ["gate-red", "fix-failed", "error", "launch-error", "item-blocked", "accounts-exhausted", "target-lost", "push-failed"].includes(k) ? "k-bad"
+  : ["spec-approved", "frozen", "decision", "round-start", "round-end"].includes(k) ? "k-acc" : "k-dim";
+function title(e) {
+  let m;
+  if ((e.kind === "gate-green" || e.kind === "gate-red") && (m = /gate #(\d+)/.exec(e.text))) return `${e.label} · gate #${m[1]}`;
+  if (e.kind.startsWith("item-") && (m = /^([^:]{1,60}):/.exec(e.text))) return `${e.label} · ${m[1]}`;
+  if (e.kind.startsWith("agent-") && e.role) return `${e.label} · ${e.role.replace(/_/g, " ")}`;
+  return e.label;
+}
+function renderEvents(st) {
+  const counts = k => k === "all" ? st.events.length : st.events.filter(e => CAT[k].includes(e.kind)).length;
+  $("filters").innerHTML = ["all", "gate", "items", "spec", "agents"].map(k =>
+    `<button class="fchip ${FILTER === k ? "on" : ""}" data-f="${k}" title="${counts(k)} events">${k}</button>`).join("");
+  const all = st.events.filter(e => FILTER === "all" || CAT[FILTER].includes(e.kind)), evs = all.slice(0, MORE ? 80 : 10);
+  $("events").innerHTML = evs.map(e => {
+    const key = e.ts + e.kind, body = e.full || e.text;
+    return `<div class="ev ${kcls(e.kind)} ${OPEN.has(key) ? "open" : ""}" data-k="${esc(key)}"><div class="when">${ago(e.ts, st.now)}</div><div class="d"></div>
+      <div style="min-width:0"><div class="t">${esc(title(e))}</div><div class="x">${esc(body)}</div></div></div>`;
+  }).join("") + (all.length > 10 ? `<button class="fchip more" style="margin-top:14px">${MORE ? "show fewer" : `show ${Math.min(80, all.length) - 10} more`}</button>` : "")
+    || `<div class="empty">Nothing yet.</div>`;
+}
+document.addEventListener("click", e => {
+  if (e.target.closest && e.target.closest(".more")) { MORE = !MORE; if (ST) renderEvents(ST); return; }
+  const f = e.target.closest && e.target.closest(".fchip");
+  if (f) { FILTER = f.dataset.f; store.set("ff.filter", FILTER); if (ST) renderEvents(ST); return; }
+  const ev = e.target.closest && e.target.closest(".ev");
+  if (ev) { const k = ev.dataset.k; OPEN.has(k) ? OPEN.delete(k) : OPEN.add(k); ev.classList.toggle("open"); }
+});
+
+// ------------------------------------------------------------------------------------ work items
+function renderFlow(st) {
+  const items = st.backlog.filter(x => !x.item.startsWith("brief: "));
+  const part = id => id.includes("-") ? id.slice(id.indexOf("-") + 1) : id;
+  const parts = [];
+  for (const it of items) if (!parts.includes(part(it.item))) parts.push(part(it.item));
+  const b = st.benchmark;
+  const bench = b.at_target ? "done" : st.phase === "optimize" ? "running" : "";
+  const audit = st.audit.converged ? "done" : st.phase === "audit" ? "running" : "";
+  const chip = (label, status) => `<span class="wi ${status}" title="${esc(status || "not started")}">${esc(label)}</span>`;
+  const arr = `<span class="arr">→</span>`;
+  $("flow").innerHTML = parts.map(p => {
+    const sp = items.filter(x => x.loop === "specify" && part(x.item) === p);
+    const im = items.filter(x => x.loop === "implement" && part(x.item) === p);
+    const cs = [];
+    if (st.phases.includes("specify")) cs.push(...(sp.length ? sp.map(x => chip(x.item, x.status)) : [chip("spec-" + p, st.approval && st.phase !== "specify" ? "done" : "")]));
+    cs.push(...(im.length ? im.map(x => chip(x.item, x.status)) : [chip("impl-" + p, st.criteria.backlog_empty ? "done" : "")]));
+    if (st.phases.includes("optimize")) cs.push(chip("bench-" + p, bench));
+    if (st.phases.includes("audit")) cs.push(chip("audit-" + p, audit));
+    return `<div class="flow">${cs.join(arr)}</div>`;
+  }).join("") || `<div class="empty">The backlogs are not listed yet.</div>`;
+}
+
+// ------------------------------------------------------------------------------------ gates
+function renderGates(st) {
+  $("gates").innerHTML = st.gates.slice(0, 8).map(g => {
+    const d = g.ended && g.started ? secs(g.ended - g.started) : "checking…";
+    const why = g.status === "red" ? `<div class="why">refused: ${esc(g.reason || "?")} · ${g.merged_later ? '<span class="good">retried and merged</span>' : g.retried ? "retried" : "not retried yet"}</div>` : "";
+    return `<div class="gh"><span class="sq ${g.status === "red" ? "red" : g.status === "green" ? "" : "running"}"></span><span>#${g.id}</span>
+      <span class="br" title="${esc(g.who)}">ff/${esc(g.who)}</span><span class="dim">${d} · ${ago(g.ended || g.started, st.now)}</span>${why}</div>`;
+  }).join("") || `<div class="empty">No change has reached the gate yet.</div>`;
+}
+
+// ------------------------------------------------------------------------------------ audit
+function renderAudit(st) {
+  const a = st.audit, rounds = a.rounds, b = st.benchmark;
+  const state = a.converged ? "converged" : rounds.length && rounds[rounds.length - 1].status !== "done" ? "running" : rounds.length ? "between rounds" : "waiting";
+  $("auditttl").textContent = `Audit · ${state}`;
+  let h = "";
+  if (a.converged) h += `<div class="good">✓ Converged after round ${esc(a.converged)}: nothing reachable at ${esc(a.converge_at)} or worse.</div>`;
+  else if (!rounds.length) {
+    const after = st.audit_after;
+    h += `<div>${after.length ? `Starts once ${after.includes("implement") ? "implement has no open items" : ""}${after.length > 1 ? " and " : ""}${after.includes("optimize") ? `optimize meets ${fx(b.target)} on main` : ""}.` : "Starts at once."}</div>`;
+    const cr = [];
+    if (after.includes("implement")) cr.push([`backlog empty`, st.criteria.backlog_empty]);
+    if (after.includes("optimize")) cr.push([`speed ${b.direction === "lower" ? "≤" : "≥"} ${fx(b.target)}`, st.criteria.at_target]);
+    if (cr.length) h += `<div class="crit">${cr.map(([t, ok]) => `<span class="${ok ? "met" : ""}">${ok ? "✓" : "○"} ${esc(t)}</span>`).join("")}</div>`;
+  }
+  const SEV = ["critical", "high", "medium", "low"];
+  for (const r of rounds.slice().reverse()) {
+    const counts = SEV.map(s => [s, r.findings.filter(f => f.severity === s).length]).filter(([, n]) => n);
+    h += `<div class="round"><b>Round ${r.n}</b> · ${r.status === "done" ? '<span class="good">done</span>' : `<span class="warn">${esc(r.status)}</span>`} <span class="dim">· ${r.findings.length} findings</span>
+      <div class="sevs">${counts.map(([s, n]) => `<span class="sev ${s}">${n} ${s}</span>`).join("")}</div>
+      <details><summary>show findings</summary>${r.findings.map(f => `<div class="finding"><span class="sev ${f.severity}">${esc(f.severity)}</span><span class="dim">${esc(f.status)}</span><span>${esc(f.title)}</span></div>`).join("")}</details></div>`;
+  }
+  $("audit").innerHTML = h;
 }
 
 let lastOk = 0;
@@ -309,7 +651,8 @@ async function tick() {
   } catch (e) {
     $("dot").classList.add("stale");
   }
-  $("updated").textContent = lastOk ? "updated " + Math.round((Date.now() - lastOk) / 1000) + "s ago" : "cannot reach the factory";
+  const s = lastOk ? Math.round((Date.now() - lastOk) / 1000) : -1;
+  $("updated").textContent = s < 0 ? "cannot reach the factory" : s < 12 ? "live" : `stale · ${s}s`;
 }
 tick();
 setInterval(tick, 5000);

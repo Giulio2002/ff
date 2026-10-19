@@ -147,6 +147,7 @@ class Benchmark:
     min_improvement_pct: float = 1.0
     target: float | None = None    # the goal: once main meets it the optimize loop stops (and audit may start)
     unit: str = ""                 # how the number reads, for people (the web UI): "×", " ns", ...
+    versus: str = ""               # what the number is measured against, for people: "geth v1.17.8"
     repeats: int = 3
     timeout_minutes: float = 30
     references: list[Reference] = field(default_factory=list)
@@ -233,6 +234,7 @@ class Limits:
     max_parallel_agents: int = 6
     nice: int = 19
     detached_agents: bool = True   # loop agents in processes of their own: a daemon restart adopts them
+    budget_usd: float | None = None  # the spend the user wants reported against (the web UI); nothing stops at it
 
 
 @dataclass

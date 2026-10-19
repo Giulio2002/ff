@@ -58,12 +58,18 @@ def main(argv: list[str] | None = None) -> int:
                                                "(0.0.0.0:8080 to expose it)")
     p.add_argument("--webui-token", default=os.environ.get("FF_WEBUI_TOKEN", ""),
                    help="require this token for the page (open it once as /?token=...)")
+    p.add_argument("--webui-details", action="store_true", default=bool(os.environ.get("FF_WEBUI_DETAILS")),
+                   help="also show code on the page (frozen statements, agents' last actions); implied by a "
+                        "token or a public repository")
     p = sub.add_parser("repo", help="create and wire the target repository (project.github: create it, set the "
                                     "remote, push the aggregated branch)")
     p = sub.add_parser("webui", help="serve the read-only progress page on its own (next to a running daemon)")
     p.add_argument("--listen", default="127.0.0.1:8080", help="[host:]port; 0.0.0.0:8080 to expose it")
     p.add_argument("--token", default=os.environ.get("FF_WEBUI_TOKEN", ""),
                    help="require this token for the page (open it once as /?token=...)")
+    p.add_argument("--details", action="store_true", default=bool(os.environ.get("FF_WEBUI_DETAILS")),
+                   help="also show code on the page (frozen statements, agents' last actions); implied by a "
+                        "token or a public repository")
     p = sub.add_parser("serve", help="serve the steering API only")
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=8787)
@@ -240,7 +246,7 @@ def cmd_run(a):
     if a.webui:
         import threading
         from . import webui
-        web = webui.serve(f.cfg, f.store, a.webui, a.webui_token or None)
+        web = webui.serve(f.cfg, f.store, a.webui, a.webui_token or None, a.webui_details)
         threading.Thread(target=web.serve_forever, daemon=True).start()
         print(f"progress page on http://{a.webui}" + (" (token required)" if a.webui_token else ""), flush=True)
     f.start_loops(names)
@@ -274,7 +280,7 @@ def cmd_repo(a):
 def cmd_webui(a):
     from . import webui
     f = _factory(a)
-    srv = webui.serve(f.cfg, f.store, a.listen, a.token or None)
+    srv = webui.serve(f.cfg, f.store, a.listen, a.token or None, a.details)
     print(f"progress page on http://{a.listen}" + (" (token required: open /?token=...)" if a.token else ""), flush=True)
     try:
         srv.serve_forever()

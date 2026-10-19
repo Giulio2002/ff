@@ -5,17 +5,23 @@ next to a running daemon). It serves one page and one JSON document (`/state.jso
 the store. Nothing here can steer the factory, and it never serves transcripts, prompts, logs,
 reproducers or credentials, so it is safe to expose. `--webui-token` (or FF_WEBUI_TOKEN) puts it
 behind a password: open the page once as /?token=<token> and the browser keeps it.
+
+Details (the text of frozen statements, and each running agent's last few actions) are shown only
+when the code is not secret from the page's viewers: the GitHub repository is public, the page has a
+token, or `--webui-details` says so.
 """
 from __future__ import annotations
 
 import hmac
 import json
 import re
+import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
+from . import frozen
 from .git import git
 from .store import Store
 
@@ -33,7 +39,7 @@ SHOWN = {
     "decided": "decided", "accounts-exhausted": "out of credits", "launch-error": "agent could not start",
     "error": "error", "loop-start": "loop started", "round-resume": "audit round resumed",
     "agent-end": "agent finished", "spec-approved": "specification approved", "frozen": "specification frozen",
-    "spec-declined": "specification sent back", "push-failed": "push failed",
+    "spec-declined": "specification sent back", "push-failed": "push failed", "agent-start": "agent started",
 }
 ROLE_WORDS = {
     "implementer": "Implementing", "optimizer": "Optimizing", "auditor_mutation": "Auditing (mutations)",
@@ -54,7 +60,184 @@ def _cost(usage: str | None) -> float:
         return 0.0
 
 
-def state(cfg, store: Store) -> dict:
+# ------------------------------------------------------------------------------------ helpers
+
+_cache: dict = {}
+_cache_lock = threading.Lock()
+
+
+def _cached(key, ttl: float, fn):
+    """fn() at most once per `ttl` seconds per key (the page polls every few seconds)."""
+    now = time.time()
+    with _cache_lock:
+        hit = _cache.get(key)
+        if hit and now - hit[0] < ttl:
+            return hit[1]
+    value = fn()
+    with _cache_lock:
+        _cache[key] = (now, value)
+    return value
+
+
+def _part(item: str | None) -> str:
+    """The part of the program an item is about: `spec-gas` and `impl-gas` are both about `gas`."""
+    if not item:
+        return ""
+    if item.startswith("brief: "):
+        return "brief"
+    return item.split("-", 1)[1] if "-" in item else item
+
+
+def _short_role(role: str) -> str:
+    return role.replace("auditor_", "auditor·").replace("_", " ")
+
+
+def _blocks(text: str, language: str) -> dict[str, str]:
+    """Every top-level declaration's full text (statement and proof) by its last name component."""
+    if language == "lean":
+        text = re.sub(r"/-.*?-/", "", text, flags=re.S)
+        start = frozen.LEAN_START
+    else:
+        start = re.compile(r"^(law|def|type)\s+([A-Za-z_][\w.]*)")
+    lines = text.splitlines()
+    out = {}
+    for _kw, name, i in frozen._blocks(lines, start):
+        out[name.split(".")[-1]] = frozen._block_text(lines, i)
+    return out
+
+
+def _glob_re(g: str) -> re.Pattern:
+    """A glob as Path.glob reads it: `**/` is zero or more directories, `*` stays inside one."""
+    out, i = "", 0
+    while i < len(g):
+        if g.startswith("**/", i):
+            out, i = out + "(?:[^/]+/)*", i + 3
+        elif g.startswith("**", i):
+            out, i = out + ".*", i + 2
+        elif g[i] == "*":
+            out, i = out + "[^/]*", i + 1
+        elif g[i] == "?":
+            out, i = out + "[^/]", i + 1
+        else:
+            out, i = out + re.escape(g[i]), i + 1
+    return re.compile(out + r"\Z")
+
+
+def _in_globs(path: str, globs: list[str]) -> bool:
+    return any(_glob_re(g).match(path) for g in globs)
+
+
+def _show(repo, rev: str, path: str) -> str:
+    return git(repo, "show", f"{rev}:{path}", check=False) or ""
+
+
+def _statements(cfg, main: str) -> list[dict]:
+    """The frozen statements on main (spec.frozen), in file order, with whether the gate locked them."""
+    def build():
+        repo, lang = cfg.project.repo, cfg.project.language
+        files = [f for f in (git(repo, "ls-tree", "-r", "--name-only", main, check=False) or "").splitlines()
+                 if _in_globs(f, cfg.spec.frozen)]
+        lock = frozen.load_lock(_show(repo, main, cfg.spec.lock_file))
+        out = []
+        for f in sorted(files):
+            for st in frozen.EXTRACTORS[lang](f, _show(repo, main, f)):
+                kind = st.text.split("\n", 1)[0]
+                out.append(dict(key=st.key, file=f, name=st.key.split("::", 1)[1], kind=kind,
+                                locked=st.key in lock, text=st.text.split("\n", 1)[1] if "\n" in st.text else ""))
+        return out
+    return _cached(("statements", main), 3600, build)
+
+
+def _touched(cfg, worktree: str, main: str) -> set[tuple[str, str]]:
+    """(file, name) of every declaration a worktree changes or adds relative to main (committed or not)."""
+    def build():
+        from pathlib import Path
+        wt = Path(worktree)
+        if not wt.is_dir():
+            return set()
+        globs = cfg.checker.files + cfg.spec.frozen
+        changed = set((git(wt, "diff", "--name-only", main, check=False) or "").splitlines())
+        changed |= set((git(wt, "ls-files", "--others", "--exclude-standard", check=False) or "").splitlines())
+        names = set()
+        for f in changed:
+            if not f or not _in_globs(f, globs) or not (wt / f).is_file():
+                continue
+            new = _blocks((wt / f).read_text(errors="replace"), cfg.project.language)
+            old = _blocks(_show(cfg.project.repo, main, f), cfg.project.language)
+            names |= {(f, n) for n, t in new.items() if old.get(n) != t}
+        return names
+    return _cached(("touched", worktree, main), 20, build)
+
+
+class _Transcript:
+    """Incremental reader of a Claude Code stream-json transcript: tokens so far and the last actions."""
+
+    def __init__(self):
+        self.offset, self.usage, self.actions = 0, {}, []
+
+    def read(self, path: str) -> "_Transcript":
+        try:
+            with open(path, "rb") as f:
+                f.seek(self.offset)
+                chunk = f.read()
+        except OSError:
+            return self
+        end = chunk.rfind(b"\n")
+        if end < 0:
+            return self
+        self.offset += end + 1
+        for raw in chunk[:end].splitlines():
+            try:
+                ev = json.loads(raw)
+            except ValueError:
+                continue
+            if ev.get("type") != "assistant":
+                continue
+            msg = ev.get("message") or {}
+            u = msg.get("usage") or {}
+            if msg.get("id") and u:
+                self.usage[msg["id"]] = (int(u.get("input_tokens") or 0) + int(u.get("output_tokens") or 0)
+                                         + int(u.get("cache_creation_input_tokens") or 0))
+            for c in msg.get("content") or []:
+                a = _action(c)
+                if a:
+                    self.actions = (self.actions + [a])[-3:]
+        return self
+
+    @property
+    def tokens(self) -> int:
+        return sum(self.usage.values())
+
+
+_transcripts: dict[str, _Transcript] = {}
+
+
+def _action(c: dict) -> str:
+    if c.get("type") == "text":
+        t = _first_line(c.get("text"), 110)
+        return f"… {t}" if t else ""
+    if c.get("type") != "tool_use":
+        return ""
+    name, inp = c.get("name") or "", c.get("input") or {}
+    if name == "Bash":
+        return "$ " + _first_line(inp.get("command"), 110)
+    path = inp.get("file_path") or inp.get("path") or inp.get("notebook_path") or ""
+    path = re.sub(r"^.*/worktrees/[^/]+/", "", str(path))
+    if name in ("Edit", "Write", "MultiEdit", "NotebookEdit"):
+        return "✎ " + path
+    if name == "Read":
+        return "… reading " + path
+    if name in ("Grep", "Glob"):
+        return "⌕ " + _first_line(inp.get("pattern"), 80)
+    return "· " + name
+
+
+def _live(run_id: str, transcript: str | None) -> _Transcript:
+    t = _transcripts.setdefault(run_id, _Transcript())
+    return t.read(transcript) if transcript else t
+
+
+def state(cfg, store: Store, details: bool = False) -> dict:
     """Everything the page shows, in plain terms."""
     now = time.time()
     repo, main_branch = cfg.project.repo, cfg.project.main_branch
@@ -142,6 +325,137 @@ def state(cfg, store: Store) -> dict:
         cost_by_role[r["role"]] = cost_by_role.get(r["role"], 0) + c
     first = store.q("SELECT MIN(started) t FROM runs")[0]["t"]
 
+    # ------------------------------------------------------------------ the redesign's extra views
+    show_details = bool(details or cfg.project.visibility == "public")
+    runs = store.q("SELECT id, role, loop, parent, status, started, ended, usage, transcript, worktree, cycle, attempt "
+                   "FROM runs ORDER BY started")
+    items_of = {}
+    for r in runs:
+        try:
+            items_of[r["id"]] = json.loads(r["cycle"] or "{}").get("item")
+        except ValueError:
+            items_of[r["id"]] = None
+
+    def lane(r) -> str:
+        part = _part(items_of.get(r["id"]))
+        return _short_role(r["role"]) + ("·" + part if part else "")
+
+    # statements: locked on main, being changed by a running agent, or named by its last red gate
+    statements = _statements(cfg, main) if main else []
+    # a statement is being worked on when its own declaration changes, or (a law or theorem) when a
+    # declaration of its name changes anywhere: its proof may live in another file
+    touched = {r["id"]: _touched(cfg, r["worktree"], main) for r in runs
+               if r["status"] in ("running", "queued") and r["worktree"]}
+    proving_by: dict[str, list[str]] = {}
+    for st in statements:
+        short = st["name"].split(".")[-1]
+        for rid, fn in touched.items():
+            if (st["file"], short) in fn or (st["kind"] in ("law", "theorem", "lemma") and any(n == short for _, n in fn)):
+                proving_by.setdefault(st["key"], []).append(rid)
+    failed_names = set()
+    live = {r["id"] for r in runs if r["status"] in ("running", "queued")}
+    for g in store.q("SELECT g.run_id, g.status, g.log FROM gates g WHERE g.id IN (SELECT MAX(id) FROM gates GROUP BY run_id)"):
+        if g["run_id"] in live and g["status"] == "red" and g["log"]:
+            try:
+                text = open(g["log"], errors="replace").read()[-20000:]
+            except OSError:
+                continue
+            failed_names |= {st["name"].split(".")[-1] for st in statements
+                             if re.search(r"\b" + re.escape(st["name"].split(".")[-1]) + r"\b", text)}
+    contract = []
+    for st in statements:
+        short = st["name"].split(".")[-1]
+        stt = ("failed" if short in failed_names else "proving" if st["key"] in proving_by
+               else "proven" if st["locked"] else "open")
+        contract.append(dict(file=st["file"], name=st["name"], kind=st["kind"], state=stt,
+                             text=st["text"][:1500] if show_details else ""))
+    laws = [c for c in contract if c["kind"] in ("law", "theorem", "lemma")]
+
+    # running agents: their item, attempt, tokens so far, what they touch
+    by_id = {r["id"]: r for r in runs}
+    attempts = {b["item"]: b["attempts"] for b in backlog}
+    for a in running:
+        r = by_id.get(a["id"])
+        item = items_of.get(a["id"])
+        t = _live(a["id"], r["transcript"] if r else None)
+        a.update(item=item or "", part=_part(item), lane=lane(r) if r else a["role"],
+                 attempt=(attempts.get(item, 0) or 0) + 1 if item else (r["attempt"] if r else None),
+                 tokens=t.tokens, cost=_cost(r["usage"]) if r and r["usage"] else None,
+                 touching=sum(1 for ids in proving_by.values() if a["id"] in ids),
+                 activity=t.actions if show_details else [])
+
+    # the agents' timeline: one lane per role and part
+    t_start = runs[0]["started"] if runs else now
+    timeline = [dict(id=r["id"], lane=lane(r), loop=r["loop"] or "", role=r["role"], status=r["status"],
+                     start=r["started"], end=r["ended"] if r["status"] not in ("running", "queued") else None,
+                     subagent=bool(r["parent"]))
+                for r in runs if r["started"]]
+    merges = [dict(ts=g["ended"], run=g["run_id"]) for g in
+              store.q("SELECT run_id, ended FROM gates WHERE status = 'green' AND ended IS NOT NULL")]
+    gate_spans = [dict(start=g["started"], end=g["ended"], status=g["status"]) for g in
+                  store.q("SELECT started, ended, status FROM gates ORDER BY id")]
+
+    # gate history: duration, and whether a refused change was tried again
+    later = {}
+    for g in store.q("SELECT id, run_id, status FROM gates ORDER BY id"):
+        later.setdefault(g["run_id"], []).append((g["id"], g["status"]))
+    for g in gates:
+        row = store.q("SELECT run_id FROM gates WHERE id = ?", (g["id"],))
+        rid = row[0]["run_id"] if row else None
+        tries = later.get(rid, [])
+        g["retried"] = any(i > g["id"] for i, _ in tries)
+        g["merged_later"] = any(i > g["id"] and s == "green" for i, s in tries)
+    durs = [g["end"] - g["start"] for g in gate_spans if g["end"] and g["start"]]
+
+    # the phases: when each started and ended
+    def ev_ts(kind, first=True):
+        r = store.q(f"SELECT {'MIN' if first else 'MAX'}(ts) t FROM events WHERE kind = ?", (kind,))
+        return r[0]["t"]
+    approved = store.flag("spec:approved")
+    try:
+        approved = float(approved) if approved else None
+    except ValueError:
+        approved = ev_ts("spec-approved")
+    spec_runs = [r["started"] for r in runs if r["loop"] == "specify" and r["started"]]
+    impl_items = [b for b in backlog if b["loop"] == "implement"]
+    impl_open = [b for b in impl_items if b["status"] in ("open", "running", "blocked")]
+    impl_start = approved if cfg.specify.enabled else (min([r["started"] for r in runs if r["loop"] == "implement"]
+                                                           or [None]) if runs else None)
+    impl_end = (max(b["updated"] for b in impl_items) if impl_items and not impl_open and store.flag("backlog:main")
+                else None)
+    if impl_end is None and impl_start and not impl_open and store.flag("backlog:main") and not impl_items:
+        impl_end = impl_start
+    opt_end = None
+    if at_target:
+        r = store.q("SELECT MAX(ts) t FROM events WHERE kind = 'target-reached'")
+        opt_end = r[0]["t"]
+    times = {"specify": [min(spec_runs) if spec_runs else None, approved],
+             "implement": [impl_start, impl_end],
+             "optimize": [impl_end, opt_end],
+             "audit": [rounds[0]["started"] if rounds else None, ev_ts("audit-done", False) if converged else None],
+             "done": [ev_ts("audit-done", False) if converged else None, None]}
+
+    # spend over time: finished runs, cumulative
+    spent = sorted((r["ended"], _cost(r["usage"])) for r in runs if r["ended"] and _cost(r["usage"]))
+    burn, acc = [], 0.0
+    for ts, c in spent:
+        acc += c
+        burn.append(dict(ts=ts, total=round(acc, 4)))
+    by_lane: dict[str, float] = {}
+    for r in runs:
+        c = _cost(r["usage"])
+        if c:
+            by_lane[lane(r)] = by_lane.get(lane(r), 0) + c
+
+    events_full = []
+    for e in store.q("SELECT ts, loop, kind, run_id, message FROM events WHERE kind IN (%s) ORDER BY id DESC LIMIT 120"
+                     % ",".join("?" * len(SHOWN)), tuple(SHOWN)):
+        msg = (e["message"] or "").strip()
+        events_full.append(dict(ts=e["ts"], kind=e["kind"], label=SHOWN[e["kind"]], loop=e["loop"],
+                                text=_first_line(msg, 300), full=msg[:2000], role=(by_id.get(e["run_id"]) or {"role": ""})["role"]
+                                if e["run_id"] in by_id else ""))
+
+    open_items = [b for b in backlog if b["status"] in ("open", "running", "blocked")]
     return dict(
         project=cfg.project.name, language=cfg.project.language,
         github=cfg.project.github if cfg.project.visibility == "public" else None, main=(main or "")[:10], now=now,
@@ -156,12 +470,23 @@ def state(cfg, store: Store) -> dict:
         running=running, gates=gates, gate_counts=gate_counts,
         audit=dict(rounds=rounds, converged=converged, converge_at=cfg.audit.converge_at,
                    waiting=store.flag("audit:waiting") or ""),
-        events=events, cost=dict(total=round(total, 2), by_role={k: round(v, 2) for k, v in
-                                                                  sorted(cost_by_role.items(), key=lambda kv: -kv[1])}),
+        events=events_full, cost=dict(total=round(total, 2), by_role={k: round(v, 2) for k, v in
+                                                                  sorted(cost_by_role.items(), key=lambda kv: -kv[1])},
+                                    by_lane={k: round(v, 2) for k, v in sorted(by_lane.items(), key=lambda kv: -kv[1])},
+                                    burn=burn, budget=cfg.limits.budget_usd),
+        details=show_details, versus=bench.versus, contract=contract, laws=len(laws),
+        laws_proven=sum(1 for c in laws if c["state"] == "proven"),
+        proving=sum(1 for c in contract if c["state"] == "proving"),
+        timeline=timeline, t_start=t_start, merges=merges, gate_spans=gate_spans,
+        gate_avg=(sum(durs) / len(durs)) if durs else None, times=times,
+        approval=cfg.specify.approval if cfg.specify.enabled else None,
+        criteria=dict(backlog_empty=not [b for b in impl_open if not b["item"].startswith("brief: ")]
+                      and bool(store.flag("backlog:main")), at_target=at_target),
+        audit_after=list(cfg.audit.after or []), max_rounds=cfg.audit.max_rounds,
     )
 
 
-def make_handler(cfg, store: Store, token: str | None):
+def make_handler(cfg, store: Store, token: str | None, details: bool = False):
     class H(BaseHTTPRequestHandler):
         def log_message(self, *a):
             pass
@@ -197,7 +522,7 @@ def make_handler(cfg, store: Store, token: str | None):
                 return self._send(200, PAGE.read_bytes(), "text/html; charset=utf-8", extra)
             if u.path == "/state.json":
                 try:
-                    body = json.dumps(state(cfg, store), default=str).encode()
+                    body = json.dumps(state(cfg, store, details or bool(token)), default=str).encode()
                 except Exception as e:  # the page must keep working while the factory changes underneath
                     return self._send(500, json.dumps({"error": repr(e)}).encode(), "application/json")
                 return self._send(200, body, "application/json", extra)
@@ -206,6 +531,6 @@ def make_handler(cfg, store: Store, token: str | None):
     return H
 
 
-def serve(cfg, store: Store, listen: str, token: str | None = None) -> ThreadingHTTPServer:
+def serve(cfg, store: Store, listen: str, token: str | None = None, details: bool = False) -> ThreadingHTTPServer:
     host, _, port = listen.rpartition(":")
-    return ThreadingHTTPServer((host or "127.0.0.1", int(port)), make_handler(cfg, store, token))
+    return ThreadingHTTPServer((host or "127.0.0.1", int(port)), make_handler(cfg, store, token, details))
