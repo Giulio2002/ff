@@ -6,7 +6,8 @@ the store. Nothing here can steer the factory, and it never serves transcripts, 
 reproducers or credentials, so it is safe to expose. `--webui-token` (or FF_WEBUI_TOKEN) puts it
 behind a password: open the page once as /?token=<token> and the browser keeps it.
 
-Details (the text of frozen statements, and each running agent's last few actions) are shown only
+Details (the text of the specification's and the contract's declarations, and each running agent's
+last few actions) are shown only
 when the code is not secret from the page's viewers: the GitHub repository is public, the page has a
 token, or `--webui-details` says so.
 """
@@ -21,8 +22,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from . import frozen
+from . import decls
 from .git import git
+from .globs import in_globs as _in_globs
 from .store import Store
 
 PAGE = Path(__file__).with_name("webui.html")
@@ -38,7 +40,7 @@ SHOWN = {
     "item-done": "item done", "item-blocked": "item blocked", "decision": "waiting for a human",
     "decided": "decided", "accounts-exhausted": "out of credits", "launch-error": "agent could not start",
     "error": "error", "loop-start": "loop started", "round-resume": "audit round resumed",
-    "agent-end": "agent finished", "spec-approved": "specification approved", "frozen": "specification frozen",
+    "agent-end": "agent finished", "spec-approved": "specification approved",
     "spec-declined": "specification sent back", "push-failed": "push failed", "agent-start": "agent started",
 }
 ROLE_WORDS = {
@@ -94,37 +96,7 @@ def _short_role(role: str) -> str:
 
 def _blocks(text: str, language: str) -> dict[str, str]:
     """Every top-level declaration's full text (statement and proof) by its last name component."""
-    if language == "lean":
-        text = re.sub(r"/-.*?-/", "", text, flags=re.S)
-        start = frozen.LEAN_START
-    else:
-        start = re.compile(r"^(law|def|type)\s+([A-Za-z_][\w.]*)")
-    lines = text.splitlines()
-    out = {}
-    for _kw, name, i in frozen._blocks(lines, start):
-        out[name.split(".")[-1]] = frozen._block_text(lines, i)
-    return out
-
-
-def _glob_re(g: str) -> re.Pattern:
-    """A glob as Path.glob reads it: `**/` is zero or more directories, `*` stays inside one."""
-    out, i = "", 0
-    while i < len(g):
-        if g.startswith("**/", i):
-            out, i = out + "(?:[^/]+/)*", i + 3
-        elif g.startswith("**", i):
-            out, i = out + ".*", i + 2
-        elif g[i] == "*":
-            out, i = out + "[^/]*", i + 1
-        elif g[i] == "?":
-            out, i = out + "[^/]", i + 1
-        else:
-            out, i = out + re.escape(g[i]), i + 1
-    return re.compile(out + r"\Z")
-
-
-def _in_globs(path: str, globs: list[str]) -> bool:
-    return any(_glob_re(g).match(path) for g in globs)
+    return {d.short: d.block for d in decls.of(language, text)}
 
 
 def _show(repo, rev: str, path: str) -> str:
@@ -132,18 +104,20 @@ def _show(repo, rev: str, path: str) -> str:
 
 
 def _statements(cfg, main: str) -> list[dict]:
-    """The frozen statements on main (spec.frozen), in file order, with whether the gate locked them."""
+    """The contract, as declarations on main: everything in the specification (spec.files), and the
+    laws and theorems stated in the harness (spec.immutable: e.g. LAWS.bend), in file order."""
     def build():
         repo, lang = cfg.project.repo, cfg.project.language
-        files = [f for f in (git(repo, "ls-tree", "-r", "--name-only", main, check=False) or "").splitlines()
-                 if _in_globs(f, cfg.spec.frozen)]
-        lock = frozen.load_lock(_show(repo, main, cfg.spec.lock_file))
+        ext = ".lean" if lang == "lean" else ".bend"
         out = []
-        for f in sorted(files):
-            for st in frozen.EXTRACTORS[lang](f, _show(repo, main, f)):
-                kind = st.text.split("\n", 1)[0]
-                out.append(dict(key=st.key, file=f, name=st.key.split("::", 1)[1], kind=kind,
-                                locked=st.key in lock, text=st.text.split("\n", 1)[1] if "\n" in st.text else ""))
+        for f in sorted((git(repo, "ls-tree", "-r", "--name-only", main, check=False) or "").splitlines()):
+            spec = _in_globs(f, cfg.spec.files)
+            if not f.endswith(ext) or not (spec or _in_globs(f, cfg.spec.immutable)):
+                continue
+            for d in decls.of(lang, _show(repo, main, f)):
+                if spec or d.kind in ("law", "theorem", "lemma"):
+                    out.append(dict(key=f"{f}::{d.name}", file=f, name=d.name, kind=d.kind, spec=spec,
+                                    text=d.statement))
         return out
     return _cached(("statements", main), 3600, build)
 
@@ -155,7 +129,7 @@ def _touched(cfg, worktree: str, main: str) -> set[tuple[str, str]]:
         wt = Path(worktree)
         if not wt.is_dir():
             return set()
-        globs = cfg.checker.files + cfg.spec.frozen
+        globs = cfg.checker.files + cfg.spec.files + cfg.spec.immutable
         changed = set((git(wt, "diff", "--name-only", main, check=False) or "").splitlines())
         changed |= set((git(wt, "ls-files", "--others", "--exclude-standard", check=False) or "").splitlines())
         names = set()
@@ -340,7 +314,10 @@ def state(cfg, store: Store, details: bool = False) -> dict:
         part = _part(items_of.get(r["id"]))
         return _short_role(r["role"]) + ("·" + part if part else "")
 
-    # statements: locked on main, being changed by a running agent, or named by its last red gate
+    # the contract's declarations: settled on main (the specification once approved; a law or theorem
+    # on main is proved, main is always green), being changed by a running agent, or named by its
+    # last red gate
+    approved = not cfg.specify.enabled or bool(store.flag("spec:approved"))
     statements = _statements(cfg, main) if main else []
     # a statement is being worked on when its own declaration changes, or (a law or theorem) when a
     # declaration of its name changes anywhere: its proof may live in another file
@@ -366,8 +343,8 @@ def state(cfg, store: Store, details: bool = False) -> dict:
     for st in statements:
         short = st["name"].split(".")[-1]
         stt = ("failed" if short in failed_names else "proving" if st["key"] in proving_by
-               else "proven" if st["locked"] else "open")
-        contract.append(dict(file=st["file"], name=st["name"], kind=st["kind"], state=stt,
+               else "proven" if approved or not st["spec"] else "open")
+        contract.append(dict(file=st["file"], name=st["name"], kind=st["kind"], state=stt, spec=st["spec"],
                              text=st["text"][:1500] if show_details else ""))
     laws = [c for c in contract if c["kind"] in ("law", "theorem", "lemma")]
 
@@ -411,15 +388,15 @@ def state(cfg, store: Store, details: bool = False) -> dict:
     def ev_ts(kind, first=True):
         r = store.q(f"SELECT {'MIN' if first else 'MAX'}(ts) t FROM events WHERE kind = ?", (kind,))
         return r[0]["t"]
-    approved = store.flag("spec:approved")
+    approved_at = store.flag("spec:approved")
     try:
-        approved = float(approved) if approved else None
+        approved_at = float(approved_at) if approved_at else None
     except ValueError:
-        approved = ev_ts("spec-approved")
+        approved_at = ev_ts("spec-approved")
     spec_runs = [r["started"] for r in runs if r["loop"] == "specify" and r["started"]]
     impl_items = [b for b in backlog if b["loop"] == "implement"]
     impl_open = [b for b in impl_items if b["status"] in ("open", "running", "blocked")]
-    impl_start = approved if cfg.specify.enabled else (min([r["started"] for r in runs if r["loop"] == "implement"]
+    impl_start = approved_at if cfg.specify.enabled else (min([r["started"] for r in runs if r["loop"] == "implement"]
                                                            or [None]) if runs else None)
     impl_end = (max(b["updated"] for b in impl_items) if impl_items and not impl_open and store.flag("backlog:main")
                 else None)
@@ -429,7 +406,7 @@ def state(cfg, store: Store, details: bool = False) -> dict:
     if at_target:
         r = store.q("SELECT MAX(ts) t FROM events WHERE kind = 'target-reached'")
         opt_end = r[0]["t"]
-    times = {"specify": [min(spec_runs) if spec_runs else None, approved],
+    times = {"specify": [min(spec_runs) if spec_runs else None, approved_at],
              "implement": [impl_start, impl_end],
              "optimize": [impl_end, opt_end],
              "audit": [rounds[0]["started"] if rounds else None, ev_ts("audit-done", False) if converged else None],
@@ -479,7 +456,7 @@ def state(cfg, store: Store, details: bool = False) -> dict:
         proving=sum(1 for c in contract if c["state"] == "proving"),
         timeline=timeline, t_start=t_start, merges=merges, gate_spans=gate_spans,
         gate_avg=(sum(durs) / len(durs)) if durs else None, times=times,
-        approval=cfg.specify.approval if cfg.specify.enabled else None,
+        approval=cfg.specify.approval if cfg.specify.enabled else None, spec_approved=approved,
         criteria=dict(backlog_empty=not [b for b in impl_open if not b["item"].startswith("brief: ")]
                       and bool(store.flag("backlog:main")), at_target=at_target),
         audit_after=list(cfg.audit.after or []), max_rounds=cfg.audit.max_rounds,

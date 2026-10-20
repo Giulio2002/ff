@@ -303,7 +303,7 @@ function stageInfo(st) {
   const items = st.backlog.filter(x => !x.item.startsWith("brief: "));
   const spec = items.filter(x => x.loop === "specify"), impl = items.filter(x => x.loop === "implement");
   const done = xs => xs.filter(x => x.status === "done").length;
-  const frozenN = st.contract.filter(c => c.state !== "open").length, total = st.contract.length;
+  const specN = st.contract.filter(c => c.spec).length, total = st.contract.length;
   const b = st.benchmark, rounds = st.audit.rounds;
   const fixed = rounds.flatMap(r => r.findings).filter(f => f.status === "fixed").length;
   let optPct = 0;
@@ -313,7 +313,7 @@ function stageInfo(st) {
                                                      : Math.min(1, b.current / b.target);
   }
   return {
-    specify: { sub: spec.length ? `${done(spec)}/${spec.length} parts · ${st.approval && frozenN ? frozenN + " statements frozen" : total + " statements drafted"}` : `${total} statements drafted`,
+    specify: { sub: `${spec.length ? done(spec) + "/" + spec.length + " parts · " : ""}${specN} declarations ${st.spec_approved ? "approved" : "drafted"}`,
                pct: spec.length ? done(spec) / spec.length : 0 },
     implement: { sub: `${done(impl)}/${impl.length} items · ${st.proving}/${total} proving`, pct: impl.length ? done(impl) / impl.length : 0 },
     optimize: { sub: b.target != null ? `target ${fx(b.target)}${st.versus ? " vs " + st.versus : ""}` : "no target", pct: optPct },
@@ -458,8 +458,7 @@ function renderAgents(st) {
 
 // ------------------------------------------------------------------------------------ contract
 function renderContract(st) {
-  const locked = st.contract.filter(c => c.state !== "open").length;
-  $("contractttl").textContent = `Contract · ${st.contract.length} ${locked ? "frozen" : "draft"} statement${st.contract.length === 1 ? "" : "s"}`;
+  $("contractttl").textContent = `Contract · ${st.contract.length} ${st.spec_approved ? "" : "draft "}declaration${st.contract.length === 1 ? "" : "s"}`;
   const files = new Map();
   st.contract.forEach((c, i) => { if (!files.has(c.file)) files.set(c.file, []); files.get(c.file).push([c, i]); });
   $("contract").innerHTML = [...files].map(([f, cs]) => {
@@ -467,14 +466,15 @@ function renderContract(st) {
     const fl = cs.filter(([c]) => c.state === "failed").length;
     return `<div class="file"><div class="fh"><span>${esc(f)}</span><span>${pv}/${cs.length} proven${pg ? ` · ${pg} proving` : ""}${fl ? ` · <span class="bad">${fl} failed</span>` : ""}</span></div>
       <div class="cells">${cs.map(([c, i]) => `<div class="cell ${c.state} ${HOVER === c.name ? "on" : ""}" data-i="${i}" tabindex="0" aria-label="${esc(c.name)}: ${c.state}"></div>`).join("")}</div></div>`;
-  }).join("") || `<div class="empty">No frozen statements on main yet.</div>`;
+  }).join("") || `<div class="empty">No specification on main yet.</div>`;
   showCell(st.contract.find(c => c.name === HOVER));
 }
 function showCell(c) {
   if (!c) { $("cinfo").textContent = "Hover a cell to see the statement."; return; }
   const what = { law: "law", theorem: "theorem", lemma: "lemma", def: "definition", type: "type", structure: "structure",
                  inductive: "type", abbrev: "definition", instance: "instance" }[c.kind] || c.kind;
-  const state = c.state === "proven" ? (["law", "theorem", "lemma"].includes(c.kind) ? "proven" : "frozen, checked") : c.state;
+  const state = c.state === "proven" ? (["law", "theorem", "lemma"].includes(c.kind) ? "proven" : "approved, checked")
+    : c.state === "open" ? "draft" : c.state;
   $("cinfo").innerHTML = `<b style="color:var(--text)">${esc(c.name)}</b> · ${esc(what)} · ${esc(state)} <span class="faint">· ${esc(c.file)}</span>`
     + (c.text ? `<pre>${esc(c.text)}</pre>` : "");
 }
@@ -550,11 +550,11 @@ function renderBurn(st) {
 const CAT = { gate: ["gate-green", "gate-red", "push-failed"],
   items: ["item-done", "item-blocked", "experiment-kept", "experiment-reverted", "target-reached", "target-lost", "fixed",
           "fix-failed", "fix-nochange", "findings", "round-start", "round-end", "round-resume", "audit-done"],
-  spec: ["spec-approved", "frozen", "spec-declined"],
+  spec: ["spec-approved", "spec-declined"],
   agents: ["agent-start", "agent-end", "launch-error", "accounts-exhausted", "error", "loop-start", "decision", "decided"] };
 const kcls = k => ["gate-green", "experiment-kept", "fixed", "item-done", "target-reached", "audit-done"].includes(k) ? "k-good"
   : ["gate-red", "fix-failed", "error", "launch-error", "item-blocked", "accounts-exhausted", "target-lost", "push-failed"].includes(k) ? "k-bad"
-  : ["spec-approved", "frozen", "decision", "round-start", "round-end"].includes(k) ? "k-acc" : "k-dim";
+  : ["spec-approved", "decision", "round-start", "round-end"].includes(k) ? "k-acc" : "k-dim";
 function title(e) {
   let m;
   if ((e.kind === "gate-green" || e.kind === "gate-red") && (m = /gate #(\d+)/.exec(e.text))) return `${e.label} · gate #${m[1]}`;

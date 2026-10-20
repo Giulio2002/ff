@@ -116,10 +116,9 @@ class Checker:
 
 @dataclass
 class Spec:
-    frozen: list[str] = field(default_factory=list)      # globs whose statements are frozen
-    lock_file: str = "frozen.lock.json"                  # in the target repo, written only by the gate
-    changes_file: str = "frozen_changes.yaml"            # every allowed change to a frozen statement
-    require_implication_proof: bool = True               # a change must name a checked "new -> old" proof
+    # the specification's files (globs). The specify loop drafts them; once the specification is
+    # approved (or from the start, without a specify loop) agents may not change them at all.
+    files: list[str] = field(default_factory=list)
     # files agents may not change at all (the harness that judges them: tests, benchmark, entry
     # points); the gate rejects a candidate that touches one. Only a human commits to these.
     immutable: list[str] = field(default_factory=list)
@@ -180,15 +179,15 @@ class ImplementLoop:
 
 @dataclass
 class SpecifyLoop:
-    """Agents draft the frozen specification itself, item by item from its own backlog (a missing
-    opcode, an unwritten rule). When that backlog is empty the human is asked to review and approve
-    it; approving freezes it, and only then does the implement loop start."""
+    """Agents draft the specification itself (spec.files), item by item from its own backlog (a
+    missing opcode, an unwritten rule). When that backlog is empty the human is asked to review and
+    approve it; once approved it is immutable, and only then does the implement loop start."""
     enabled: bool = False
     role: str = "specifier"
     workers: int = 2
     max_attempts: int = 3
     backlog_command: str = ""
-    # human: the user approves the drafted spec (a decision); auto: it is frozen as soon as the spec
+    # human: the user approves the drafted spec (a decision); auto: it is approved as soon as the spec
     # backlog is empty (the backlog command decides when the spec is complete and checked), for users
     # who leave the specification end to end to the agents
     approval: str = "human"
@@ -334,6 +333,10 @@ def load(path: str | os.PathLike) -> Config:
         raise ConfigError("checker.files: list the globs of every file the checker must accept")
 
     spec_raw = _take(raw, "spec", {}) or {}
+    gone = {"frozen", "lock_file", "changes_file", "require_implication_proof"} & set(spec_raw)
+    if gone:
+        raise ConfigError(f"spec: {sorted(gone)} no longer exist (frozen statements were removed): list the "
+                          "specification's files in spec.files; they are immutable once the specification is approved")
     _no_extra(spec_raw, set(Spec.__dataclass_fields__), "spec")
     spec = Spec(**spec_raw)
 

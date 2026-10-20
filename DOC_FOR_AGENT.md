@@ -2,7 +2,7 @@
 
 You are an AI coding agent (Claude Code, Codex, ...). A user handed you this file because they want a
 program built with **formal-factory** (`ff`): AI agents write the program **and machine-checked
-proofs** that it meets a frozen specification, a proof checker keeps score, and a deterministic gate
+proofs** that it meets a specification, a proof checker keeps score, and a deterministic gate
 decides what reaches the repository's aggregated branch. Targets are written in **Bend 2** or
 **Lean 4**. A run goes through its phases by itself:
 
@@ -22,7 +22,7 @@ for each:
 
 1. **What to build.** The program, its public interface, and what "correct" means. Ask for any spec,
    standard, reference implementation or test suite they already have.
-2. **The specification.** Is there an existing formal spec to freeze, or should the agents draft one
+2. **The specification.** Is there an existing formal spec to use, or should the agents draft one
    (`loops.specify`) for the user to review and approve? The spec is the one thing a human must sign
    off: nothing is built against it until they approve.
 3. **Language.** Bend 2 or Lean 4.
@@ -51,7 +51,8 @@ for each:
    pool has accounts, the default login is no longer used, so add the current one too.
 10. **The web UI.** Do they want the read-only progress page (`--webui`)? On localhost only, or exposed
     to the internet? Behind a token (`--webui-token`)? The page never shows code unless the repository is public, it has a
-    token, or `--webui-details` is passed: then it also shows frozen statements and agents' last actions.
+    token, or `--webui-details` is passed: then it also shows the contract's declarations and agents'
+    last actions.
 11. **Budget and attention.** Is there a spend limit they want reported against? How often should you
     report? Which decisions do they want to be asked about?
 
@@ -64,8 +65,8 @@ Confirm the plan back in a few lines before building anything.
    (the laws that define "done"), a **fast** backlog command, the tests, the benchmark. Set
    `project.github` so that ff creates and pushes it (`ff repo`).
 3. Write `factory.yaml` (§3) and run `ff validate`.
-4. With an existing spec: show it to the user, and run `ff freeze --yes` only after they approve it.
-   With `loops.specify`: the factory asks them when the draft is complete.
+4. With an existing spec: have the user approve it before you start; agents never change it. With
+   `loops.specify`: the factory asks them when the draft is complete.
 5. Start it in tmux: `ff run --api 127.0.0.1:8787 [--webui 0.0.0.0:8080]` (§5).
 
 ### 0.3 While it runs
@@ -100,8 +101,8 @@ a human should write:
 
 | What | Example (Bend) | Why |
 |---|---|---|
-| The specification | `spec/*.bend` | what the program must do; frozen |
-| The contract | `proofs/contract.bend`: the laws that must be proved | what "done" means; frozen |
+| The specification | `spec/*.bend` | what the program must do; agents never change it once approved (`spec.files`) |
+| The contract | `proofs/contract.bend`: the laws that must be proved | what "done" means; agents never change it (`spec.immutable`) |
 | A backlog command | `tools/backlog.py`: prints one open item per line (`<id>\t<description>`) | the implement loop's work list (keep it fast: it runs on every change of main) |
 | Tests | unit tests, official test vectors, runtime tests of the compiled library | run by the gate on every candidate |
 | A benchmark (optional) | `tools/bench.py`: prints one number | what the optimize loop chases |
@@ -144,7 +145,8 @@ checker:
     kernel_recheck: true         # also `bend --verdict` (the formal kernel) in the gate
 
 spec:
-  frozen: ["spec/*.bend", "proofs/contract.bend", "proofs/laws.bend"]
+  files: ["spec/*.bend"]         # the specification: drafted by loops.specify, immutable once approved
+  immutable: ["proofs/contract.bend", "tools/**", "tests/**"]   # the contract and the harness: agents never change them
 
 benchmark:                       # only for the optimize loop
   command: cd tools && python3 bench.py
@@ -178,7 +180,7 @@ roles:                           # every agent role: provider, timeout, subagent
 
 loops:
   # specify: {enabled: true, workers: 2, backlog_command: python3 tools/spec_backlog.py}
-  #   agents draft the spec; implementation waits until the user approves (and so freezes) it
+  #   agents draft the spec; implementation waits until the user approves it (then it is immutable)
   implement: {enabled: true, workers: 2, max_attempts: 4, backlog_command: python3 tools/backlog.py}
   optimize:  {enabled: true, workers: 1}
   audit:
@@ -202,25 +204,25 @@ Notes:
 - The daemon re-reads `factory.yaml` when it changes. Commands, budgets, models, prompts and timeouts
   apply to the next run and gate. Worker counts need a restart.
 
-## 4. Freeze the specification
+## 4. Approve the specification
 
-With an existing specification, after the user has approved it:
+The specification is the files in `spec.files`. Agents may never change it once it is approved, and
+the gate rejects any candidate that does (like the `spec.immutable` harness).
 
-```sh
-ff freeze --yes
-```
+With an existing specification, the user approves it before you start, and there is nothing to run:
+without `loops.specify` it is immutable from the start.
 
-With `loops.specify`, skip this: agents draft the spec from the spec backlog. With
-`approval: auto` (the user leaves the spec end to end to the agents), it is frozen as soon as the spec
-backlog is empty, so make the spec backlog command demand real evidence (e.g. the spec checked against
-a reference implementation). With `approval: human` (the default), when it is complete the factory
-asks the user (a decision in `ff status`, the chat and the web UI) to approve it.
-Approving freezes it and starts implementation. Answering anything else keeps it open: brief the
-specify loop with what to change (`ff brief specify "..."`), and it asks again once that has landed.
+With `loops.specify`, agents draft it from the spec backlog, editing `spec.files` freely until it is
+approved. With `approval: auto` (the user leaves the spec end to end to the agents), it is approved as
+soon as the spec backlog is empty, so make the spec backlog command demand real evidence (e.g. the
+spec checked against a reference implementation). With `approval: human` (the default), when it is
+complete the factory asks the user (a decision in `ff status`, the chat and the web UI) to approve it.
+Approving starts implementation. Answering anything else keeps it open: brief the specify loop with
+what to change (`ff brief specify "..."`), and it asks again once that has landed.
 
-This locks every frozen statement (`spec.frozen`) on `main`, in `frozen.lock.json`. After this, only
-the gate writes the lock. If you, the human, change the spec later, re-freeze with
-`ff freeze --yes --force`.
+Every harness command (tests, backlogs, benchmark) runs with `FF_SPEC_APPROVED=1` or `0` in its
+environment, so a harness can hold the implementation to the specification only once it is settled.
+If you, the human, change an approved specification later, commit the change to `main` yourself.
 
 ## 5. Run it
 
@@ -373,17 +375,15 @@ checks with `ff check` before they submit.
 
 1. It must contain the current `main`. The gate rebases stale candidates itself; only a real conflict
    goes back to the agent.
-2. `frozen.lock.json` is untouched (only the gate writes it), and so are the `spec.immutable`
-   files: the harness that judges the agents (tests, benchmark, entry points). Only a human
-   commits to those.
+2. The `spec.immutable` files (the harness that judges the agents: the contract, tests, benchmark,
+   entry points) are untouched, and so are the `spec.files` once the specification is approved.
+   Only a human commits to those.
 3. `workflow: generators`: regenerating must reproduce exactly the committed files.
-4. Frozen statements are unchanged. A change must be recorded in `frozen_changes.yaml` with a reason
-   and the name of a proof that the new statement implies the old one.
-5. No FFI outside `ffi.allow` (banned by default; see below).
-6. Every checked file passes within `file_timeout_seconds`, with nothing from `forbid`. Bend adds the
-   `--verdict` kernel recheck; Lean adds an axiom audit (no hidden `sorry`).
-7. `unit_tests`, `vectors` and `runtime_tests` pass.
-8. Green: `main` moves to exactly that tree, and new statements are locked.
+4. No FFI outside `ffi.allow` (banned by default; see below).
+5. Every checked file passes within `file_timeout_seconds`, with nothing from `forbid`. Bend adds the
+   `--verdict` kernel recheck; Lean adds an axiom audit of every theorem (no hidden `sorry`).
+6. `unit_tests`, `vectors` and `runtime_tests` pass.
+7. Green: `main` moves to exactly that tree.
 
 ### FFI is banned unless the user allows it
 
@@ -436,7 +436,6 @@ Commands for reading it: `ff runs`, `ff show <id>`, `ff tail -f <id>`, `ff event
 |---|---|
 | `ff init [--language bend\|lean]` / `ff validate` | write / check `factory.yaml` |
 | `ff repo` | create and wire the repository (`project.github`), push the aggregated branch |
-| `ff freeze --yes [--force]` | lock the frozen statements on main |
 | `ff run [--loops ...] [--api host:port]` / `ff serve` | the daemon / the API alone |
 | `ff chat` | the coordinator chat |
 | `ff status [--json]`, `ff watch`, `ff events`, `ff digest` | where things are |

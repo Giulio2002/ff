@@ -12,8 +12,8 @@ cases) before you guess, and take the ideas that make the biggest difference to 
 {references}
 
 Port an idea, do not copy foreign code: the change is made {change_path}, and its proofs must
-check like everything else (you may add or change helper laws and proofs; frozen statements stay
-as they are).
+check like everything else (you may add or change helper laws and proofs; the specification and the contract's laws
+stay as they are).
 
 ## Rules
 

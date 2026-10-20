@@ -12,7 +12,6 @@ import sys
 import time
 from pathlib import Path
 
-from . import frozen
 from .config import ConfigError, load
 
 EXAMPLES = Path(__file__).resolve().parent.parent / "examples"
@@ -59,7 +58,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--webui-token", default=os.environ.get("FF_WEBUI_TOKEN", ""),
                    help="require this token for the page (open it once as /?token=...)")
     p.add_argument("--webui-details", action="store_true", default=bool(os.environ.get("FF_WEBUI_DETAILS")),
-                   help="also show code on the page (frozen statements, agents' last actions); implied by a "
+                   help="also show code on the page (specification and contract declarations, agents' last actions); implied by a "
                         "token or a public repository")
     p = sub.add_parser("repo", help="create and wire the target repository (project.github: create it, set the "
                                     "remote, push the aggregated branch)")
@@ -68,7 +67,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--token", default=os.environ.get("FF_WEBUI_TOKEN", ""),
                    help="require this token for the page (open it once as /?token=...)")
     p.add_argument("--details", action="store_true", default=bool(os.environ.get("FF_WEBUI_DETAILS")),
-                   help="also show code on the page (frozen statements, agents' last actions); implied by a "
+                   help="also show code on the page (specification and contract declarations, agents' last actions); implied by a "
                         "token or a public repository")
     p = sub.add_parser("serve", help="serve the steering API only")
     p.add_argument("--host", default="127.0.0.1")
@@ -126,9 +125,6 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--files", nargs="*")
     p.add_argument("--no-tests", action="store_true")
     p.add_argument("--no-regenerate", action="store_true")
-    p = sub.add_parser("freeze", help="lock the current frozen statements on main (human bootstrap)")
-    p.add_argument("--yes", action="store_true")
-    p.add_argument("--force", action="store_true", help="replace an existing lock")
 
     p = sub.add_parser("note", help="(agents) a progress note for the coordinator")
     p.add_argument("text")
@@ -545,38 +541,16 @@ def cmd_gate_run(a):
 def cmd_check(a):
     from .gate import verify_tree
     from .git import git as _git
+    from .store import Store
     cfg = load(a.config)
     root = Path(os.environ.get("FF_WORKTREE") or _git(Path.cwd(), "rev-parse", "--show-toplevel"))
-    lock = frozen.load_lock(_git(root, "show", f"{cfg.project.main_branch}:{cfg.spec.lock_file}", check=False) or None)
-    v = verify_tree(cfg, root, lock, regenerate=not a.no_regenerate, only=a.files, run_tests=not a.no_tests,
-                    full=not a.files)
+    db = cfg.project.state_dir / "factory.db"
+    approved = not cfg.specify.enabled or (db.exists() and bool(Store(db).flag("spec:approved")))
+    base = _git(root, "merge-base", "HEAD", cfg.project.main_branch, check=False) or None
+    v = verify_tree(cfg, root, approved=approved, base=base, regenerate=not a.no_regenerate, only=a.files,
+                    run_tests=not a.no_tests, full=not a.files)
     print(("OK: the gate's checks pass on this tree" if v.ok else f"FAIL at {v.stage}: {v.reason}") + "\n\n" + v.log[-8000:])
     return 0 if v.ok else 1
-
-
-def cmd_freeze(a):
-    """Bootstrap: write the lock for the current frozen statements directly on main. This is the
-    human freezing the spec; afterwards only the gate writes the lock."""
-    from .git import git as _git
-    cfg = load(a.config)
-    repo, main = cfg.project.repo, cfg.project.main_branch
-    existing = _git(repo, "show", f"{main}:{cfg.spec.lock_file}", check=False)
-    if existing and not a.force:
-        print(f"{cfg.spec.lock_file} already exists on {main}; use --force to replace it", file=sys.stderr)
-        return 1
-    from .factory import Factory
-    f = Factory(cfg)
-    with f.main_view("freeze") as view:
-        stmts = frozen.collect(view, cfg.spec.frozen, cfg.project.language)
-    print(f"{len(stmts)} statements in {', '.join(cfg.spec.frozen)}:")
-    for k in sorted(stmts):
-        print(f"  {k}")
-    if not a.yes:
-        print("re-run with --yes to commit the lock on main")
-        return 0
-    n = f.freeze(force=bool(a.force))
-    f.store.set_flag("spec:approved", str(time.time()))     # a human froze it: the specification is approved
-    print(f"locked {n} statements on {main}")
 
 
 def cmd_note(a):

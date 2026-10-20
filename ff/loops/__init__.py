@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING
 
 from ..agents import RunResult, new_run_id
 from ..checkers import run_cmd
+from ..gate import harness_env
 from ..git import git, sha
 
 if TYPE_CHECKING:
@@ -214,7 +215,8 @@ class ImplementLoop(Loop):
                             and time.time() - float(self.store.flag(self._bkey + ":failed-at") or 0) < 1800):
             return
         with self.f.main_view("backlog") as view:
-            code, out, secs, timed_out = run_cmd(cmd, view, 1800, self.cfg.limits.nice)
+            code, out, secs, timed_out = run_cmd(cmd, view, 1800, self.cfg.limits.nice,
+                                                 env=harness_env(self.f.spec_approved()))
         if code != 0 or timed_out:
             self.store.set_flag(self._bkey, "failed:" + main)
             self.store.set_flag(self._bkey + ":failed-at", str(time.time()))
@@ -278,7 +280,7 @@ class ImplementLoop(Loop):
             # nothing is implemented against a specification nobody has approved yet
             if self.store.flag("implement:waiting") != "spec":
                 self.store.set_flag("implement:waiting", "spec")
-                self.log("waiting", "implement waits for the specification to be approved and frozen")
+                self.log("waiting", "implement waits for the specification to be approved")
             self.stop.wait(120)
             return
         item = self.take()
@@ -330,26 +332,28 @@ class ImplementLoop(Loop):
 # ===================================================================== specify
 
 class SpecifyLoop(ImplementLoop):
-    """Agents write the specification itself, item by item; the human approves it, which freezes
-    it. Implementation starts after that (ImplementLoop.worker waits for spec:approved)."""
+    """Agents write the specification itself (spec.files), item by item; the human approves it, and
+    from then on it is immutable. Implementation starts after that (ImplementLoop.worker waits for
+    spec:approved)."""
     name = "specify"
 
     @property
     def task_intro(self) -> str:
         if self.cfg.specify.approval == "auto":
-            return ("Write this part of the specification. Nobody reviews it by hand: it is frozen automatically "
-                    "as soon as the spec backlog is empty, and everything after is proved against it, so it must "
-                    "be faithful to its source in every detail and pass the specification's checks:")
+            return ("Write this part of the specification. Nobody reviews it by hand: it is approved automatically "
+                    "as soon as the spec backlog is empty and cannot change after that, and everything after is "
+                    "proved against it, so it must be faithful to its source in every detail and pass the "
+                    "specification's checks:")
         return SpecifyLoop._human_intro
 
-    _human_intro = ("Write this part of the specification. It will be frozen once a human approves it, "
+    _human_intro = ("Write this part of the specification. Once a human approves it, it cannot change, "
                     "so make it faithful to its source and easy to review side by side with it:")
 
     def worker(self, i: int):
         if not self.wait_unpaused():
             return False
         if self.store.flag("spec:approved"):
-            return False                      # frozen: this loop is finished
+            return False                      # approved: this loop is finished
         item = self.take()
         if item is not None:
             self.run_item(item)
@@ -368,11 +372,10 @@ class SpecifyLoop(ImplementLoop):
             return                            # another worker got here first
         main = sha(self.cfg.project.repo, self.cfg.project.main_branch)
         if self.cfg.specify.approval == "auto":
-            n = self.f.freeze(force=True)
             self.store.set_flag("spec:approved", str(time.time()))
             self.log("spec-approved", f"the specification is complete (spec backlog empty) and approved "
-                                      f"automatically (loops.specify.approval: auto): {n} statements frozen on "
-                                      f"{main[:10]}; implementation starts")
+                                      f"automatically (loops.specify.approval: auto) at {main[:10]}; it is "
+                                      f"immutable from now on; implementation starts")
             return
         asked = self.store.flag("spec:asked") or ""
         if asked == "declined@" + main:
@@ -383,8 +386,8 @@ class SpecifyLoop(ImplementLoop):
                 self.store.x("UPDATE decisions SET answer = 'superseded', answered = ? WHERE id = ?", (time.time(), d["id"]))
             did = str(self.store.ask(
                 f"The specification is drafted on main ({main[:10]}): every item of the spec backlog is done. "
-                f"Review {', '.join(self.cfg.spec.frozen)} in {self.cfg.project.repo} (or on GitHub). Approve "
-                f"to freeze it and start implementing; or answer anything else and brief the specify loop "
+                f"Review {', '.join(self.cfg.spec.files)} in {self.cfg.project.repo} (or on GitHub). Approve "
+                f"to make it immutable and start implementing; or answer anything else and brief the specify loop "
                 f"(`ff brief specify ...`) with what to change.", ["approve", "not yet"]))
             self.store.set_flag("spec:asked", f"{did}@{main}")
             self.log("waiting", "the specification is drafted: waiting for a human to approve it")
@@ -392,10 +395,9 @@ class SpecifyLoop(ImplementLoop):
         if ans is None:
             return
         if ans.strip().lower() in ("approve", "approved", "yes", "y"):
-            n = self.f.freeze(force=True)
             self.store.set_flag("spec:approved", str(time.time()))
-            self.log("spec-approved", f"the specification is approved: {n} statements frozen on main; "
-                                      f"implementation starts")
+            self.log("spec-approved", f"the specification is approved at {main[:10]}: it is immutable from now "
+                                      f"on; implementation starts")
         else:
             self.store.set_flag("spec:asked", "declined@" + main)
             self.log("spec-declined", f"the specification was not approved ({ans}); brief the specify loop "
@@ -411,7 +413,8 @@ class OptimizeLoop(Loop):
         b = self.cfg.benchmark
         vals = []
         for _ in range(max(1, b.repeats)):
-            code, out, _, to = run_cmd(b.command, root, b.timeout_minutes * 60, self.cfg.limits.nice)
+            code, out, _, to = run_cmd(b.command, root, b.timeout_minutes * 60, self.cfg.limits.nice,
+                                       env=harness_env(self.f.spec_approved()))
             m = re.search(b.metric, out)
             if code != 0 or to or not m:
                 self.log("bench-error", f"benchmark failed in {root.name}: {out[-400:]}")
@@ -433,10 +436,9 @@ class OptimizeLoop(Loop):
 
     def reuse_measurement(self, measured: str, value: float) -> None:
         """The kept candidate was benchmarked at commit `measured`. If main is that same code (the gate
-        may only have added its lock commit), that number is main's baseline: no second benchmark."""
+        moves main to exactly the candidate), that number is main's baseline: no second benchmark."""
         repo, main = self.cfg.project.repo, sha(self.cfg.project.repo, self.cfg.project.main_branch)
-        same = subprocess.run(["git", "diff", "--quiet", measured, main, "--", ".",
-                               f":(exclude){self.cfg.spec.lock_file}"], cwd=repo).returncode == 0
+        same = subprocess.run(["git", "diff", "--quiet", measured, main], cwd=repo).returncode == 0
         if same:
             self.store.set_flag(f"baseline:{main}", str(value))
 

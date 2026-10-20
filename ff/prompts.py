@@ -8,17 +8,14 @@ from .config import Config, Role
 
 PREAMBLE = """\
 You are one agent inside a formal-programs factory for the project "{project}" ({language}).
-A formal program is code that comes with machine-checked proofs that it does what a frozen
+A formal program is code that comes with machine-checked proofs that it does what its
 specification says, for every input. Machines produce the code and proofs; a checker decides.
 
 Your working copy: {worktree} (a git worktree on branch {branch}). Work only there.
 
 Rules of the factory (the gate enforces every one of them; breaking one wastes your run):
 - {change_rule}
-- Frozen statements (in {frozen}) must not change or be weakened. If one truly has to change,
-  the new statement must be at least as strong: add an entry to `{changes_file}` with the key,
-  old hash, new hash, a reason, and the name of a proof that the new statement implies the old.
-  Never edit `{lock_file}`.
+- {spec_rule}
 - Every file in {check_files} must pass the checker within {file_budget}s.
   Forbidden anywhere in them: {forbid}.
 - {ffi_rule}
@@ -71,7 +68,7 @@ def _workflow_words(cfg: Config) -> dict:
         return dict(
             change_rule=(f"Never hand-edit generated files ({', '.join(cfg.generated)}). Change the generators and "
                          f"regenerate with `{regen}`; a bug fixed in a generator is fixed for every output at once."),
-            check_does="regenerates, checks the frozen statements and runs the checker",
+            check_does="regenerates, checks you changed nothing you may not change, and runs the checker",
             edit_step=f"Edit a generator (never a generated file), regenerate everything with `{regen}`.",
             change_path="through the generators",
             change_rule_short="Change generators, not generated files.",
@@ -79,7 +76,7 @@ def _workflow_words(cfg: Config) -> dict:
     return dict(
         change_rule="Edit the implementation and the proofs directly; keep shared lemmas in one place rather "
                     "than copying them, so a fix lands once.",
-        check_does="checks the frozen statements and runs the checker",
+        check_does="checks you changed nothing you may not change, and runs the checker",
         edit_step="Edit the implementation and its proofs.",
         change_path="in the code and its proofs",
         change_rule_short="",
@@ -120,8 +117,12 @@ def build(cfg: Config, role: Role, task: str, *, worktree: str, branch: str, res
         project=cfg.project.name, language=cfg.project.language, worktree=worktree, branch=branch,
         role=role.name,
         generated=", ".join(cfg.generated) or "(none)", regenerate=cfg.commands.get("regenerate", "(none)"),
-        frozen=", ".join(cfg.spec.frozen) or "(none)", changes_file=cfg.spec.changes_file,
-        lock_file=cfg.spec.lock_file, check_files=", ".join(cfg.checker.files),
+        spec_files=", ".join(cfg.spec.files) or "(none)",
+        spec_rule=(f"The specification ({', '.join(cfg.spec.files)}) is the contract. The specify loop drafts it; "
+                   "once it is approved, nobody but a human changes it: never weaken or edit it to fit the code. "
+                   "If it is wrong, say so in your summary or with `ff note`."
+                   if cfg.spec.files else "The specification is the contract: never weaken it to fit the code."),
+        check_files=", ".join(cfg.checker.files),
         file_budget=int(cfg.checker.file_timeout_seconds),
         forbid=", ".join(f"/{p}/" for p in cfg.checker.forbid) or "(nothing)",
         result_file=result_file, result_extra=result_extra,

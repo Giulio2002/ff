@@ -29,10 +29,8 @@ checker:
     forbid: ["@unsafe"]
 
 spec:
-  frozen: ["spec/**/*.bend", "proofs/**/laws.bend"]
-  lock_file: frozen.lock.json
-  changes_file: frozen_changes.yaml
-  require_implication_proof: true
+  files: ["spec/**/*.bend"]          # the specification: drafted by loops.specify, immutable once approved
+  immutable: ["proofs/**/laws.bend", "tools/**"]    # the contract and the harness: agents never change them
 
 benchmark:
   command: python3 tools/bench.py --json         # prints the number the optimizer chases
@@ -135,7 +133,7 @@ roles:
     prompt: |
       # Role: prover
       Get the one law or lemma you are given to check, through the generators. Report what you
-      changed and whether `ff check --files ...` passes. Do not touch frozen statements.
+      changed and whether `ff check --files ...` passes. Do not touch the specification or the contract.
   attacker:
     provider: glm
     subagent_only: true

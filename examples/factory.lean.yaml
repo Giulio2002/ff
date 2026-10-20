@@ -26,13 +26,11 @@ checker:
     file_timeout_seconds: 120     # "each file under 2 minutes"
     jobs: 16
     # forbidden by default: sorry, admit, axiom, implemented_by, unsafe, debug.skipKernelTC, native_decide
-    allowed_axioms: [propext, Classical.choice, Quot.sound]   # #print axioms of every frozen theorem
+    allowed_axioms: [propext, Classical.choice, Quot.sound]   # #print axioms of every theorem
 
 spec:
-  frozen: ["MyLib/Spec/**/*.lean", "MyLib/Laws/**/*.lean"]
-  lock_file: frozen.lock.json
-  changes_file: frozen_changes.yaml
-  require_implication_proof: true
+  files: ["MyLib/Spec/**/*.lean"]          # the specification: drafted by loops.specify, immutable once approved
+  immutable: ["MyLib/Laws/**/*.lean", "tools/**"]    # the contract and the harness: agents never change them
 
 benchmark:
   command: python3 tools/bench.py --json         # prints the number the optimizer chases
@@ -135,7 +133,7 @@ roles:
     prompt: |
       # Role: prover
       Get the one law or lemma you are given to check, through the generators. Report what you
-      changed and whether `ff check --files ...` passes. Do not touch frozen statements.
+      changed and whether `ff check --files ...` passes. Do not touch the specification or the contract.
   attacker:
     provider: glm
     subagent_only: true

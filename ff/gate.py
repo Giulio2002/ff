@@ -3,20 +3,20 @@
 Deterministic Python, not an agent, so nobody can talk it into a shortcut. For a candidate branch:
 
   0. the candidate must contain the current main (otherwise the caller rebases and asks again)
-  1. cold: a fresh clone of the candidate commit, no caches
-  2. the lock file and the spec.immutable files (the harness) are untouched by the candidate
+  1. agents' changes stay out of the files they may not change: the harness (spec.immutable), and
+     the specification (spec.files) once it is approved, or always when no specify loop drafts it
+  2. cold: a fresh clone of the candidate commit, no caches
   3. (workflow: generators) regenerate every generated file; the tree must be byte-identical to
      what was committed
-  4. frozen statements: unchanged, or changed with a recorded, proved strengthening (lock from main)
+  4. no FFI outside the files the user allowed (ffi.allow); banned by default
   5. no forbidden construct; every file checks within its budget; language extras
      (bend --verdict kernel recheck, lean axiom audit)
-  6. no FFI outside the files the user allowed (ffi.allow); banned by default
-  7. unit tests, test vectors, runtime tests
-  7. green: commit the updated lock (new statements locked) on top, and move main to exactly that
-     tree with a compare-and-swap; push to the remote when one is configured.
+  6. unit tests, test vectors, runtime tests, with FF_SPEC_APPROVED (1 or 0) in their environment
+  7. green: move main to exactly the candidate with a compare-and-swap; push to the remote when one
+     is configured.
 
-`verify_tree` (steps 3-6) is also what `ff check` runs inside an agent's worktree, so agents see the
-gate's verdict before they ask for it.
+`verify_tree` (steps 1 and 3-6) is also what `ff check` runs inside an agent's worktree, so agents
+see the gate's verdict before they ask for it.
 """
 from __future__ import annotations
 
@@ -25,13 +25,13 @@ import json
 import shutil
 import subprocess
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
-from . import frozen
 from .checkers import CheckReport, make, run_cmd
 from .config import Config
-from .git import git, is_ancestor, sha, show
+from .git import git, is_ancestor, sha
+from .globs import in_globs
 from .store import Store
 
 
@@ -42,13 +42,40 @@ class Verdict:
     reason: str = ""
     log: str = ""
     check: CheckReport | None = None
-    new_lock: dict[str, str] = field(default_factory=dict)
-    added: list[str] = field(default_factory=list)
 
 
-def verify_tree(cfg: Config, root: Path, lock: dict[str, str], *, regenerate: bool = True,
+def locked_globs(cfg: Config, approved: bool) -> list[str]:
+    """What agents may not change: the harness, and the specification once it is approved."""
+    return cfg.spec.immutable + (cfg.spec.files if approved or not cfg.specify.enabled else [])
+
+
+def harness_env(approved: bool) -> dict[str, str]:
+    """The environment of every harness command (tests, backlogs, benchmark)."""
+    return {"FF_SPEC_APPROVED": "1" if approved else "0"}
+
+
+def touched_locked(cfg: Config, root: Path, base: str, head: str | None, approved: bool) -> list[str]:
+    """Files under `locked_globs` that differ between `base` and `head` (None: the working tree)."""
+    globs = locked_globs(cfg, approved)
+    if not globs:
+        return []
+    names = git(root, "diff", "--name-only", base, *([head] if head else []), check=False).splitlines()
+    if head is None:
+        names += git(root, "ls-files", "--others", "--exclude-standard", check=False).splitlines()
+    return sorted({f for f in names if f and in_globs(f, globs)})
+
+
+def verify_tree(cfg: Config, root: Path, *, approved: bool, base: str | None = None, regenerate: bool = True,
                 only: list[str] | None = None, run_tests: bool = True, full: bool = True) -> Verdict:
+    """The gate's checks on the tree at `root`. With `base` (a commit, e.g. main), also that the
+    working tree changes nothing agents may not change."""
     log = []
+    if base:
+        bad = touched_locked(cfg, root, base, None, approved)
+        if bad:
+            return Verdict(False, "immutable", "changes files agents may not change (spec.immutable"
+                           + (", and spec.files: the specification is approved" if cfg.spec.files and
+                              (approved or not cfg.specify.enabled) else "") + ")", "\n".join(bad))
     if regenerate and cfg.project.workflow == "generators" and cfg.commands.get("regenerate"):
         before = git(root, "status", "--porcelain", "--untracked-files=all", check=False)
         code, out, secs, _ = run_cmd(cfg.commands["regenerate"], root, 3600, cfg.limits.nice)
@@ -62,13 +89,6 @@ def verify_tree(cfg: Config, root: Path, lock: dict[str, str], *, regenerate: bo
                            "(edit the generators, not their output, and commit the regenerated files)",
                            "\n".join(log) + "\n" + after + "\n" + diff)
     checker = make(cfg.project.language, cfg.checker, cfg.limits.nice)
-    names = frozen.declared_names(root, cfg.checker.files + cfg.spec.frozen, cfg.project.language)
-    changes = (root / cfg.spec.changes_file).read_text() if (root / cfg.spec.changes_file).exists() else None
-    fr = frozen.verify(root, cfg.spec.frozen, cfg.project.language, lock, changes,
-                       cfg.spec.require_implication_proof, names)
-    if not fr.ok:
-        return Verdict(False, "frozen", "frozen statements changed", "\n".join(log + fr.problems))
-    log.append(f"frozen: {len(lock)} locked statements ok, {len(fr.added)} new, {len(fr.changed_ok)} recorded changes")
     from .ffi import violations
     bad = violations(root, cfg.project.language, cfg.ffi.allow)
     if bad:
@@ -77,7 +97,7 @@ def verify_tree(cfg: Config, root: Path, lock: dict[str, str], *, regenerate: bo
                        f"allowed: {allowed})", "\n".join(log + bad))
     log.append("ffi: none outside " + (", ".join(cfg.ffi.allow) or "(FFI banned)"))
     files = [root / f for f in only] if only else None
-    rep = checker.check(root, only=files, frozen_globs=cfg.spec.frozen, full=full)
+    rep = checker.check(root, only=files, full=full)
     log.append("checker: " + rep.summary())
     if not rep.ok:
         return Verdict(False, "check", "the checker rejected the tree", "\n".join(log) + "\n\n" + rep.details(),
@@ -87,11 +107,11 @@ def verify_tree(cfg: Config, root: Path, lock: dict[str, str], *, regenerate: bo
             cmd = cfg.commands.get(name)
             if not cmd:
                 continue
-            code, out, secs, to = run_cmd(cmd, root, 7200, cfg.limits.nice)
+            code, out, secs, to = run_cmd(cmd, root, 7200, cfg.limits.nice, env=harness_env(approved))
             log.append(f"$ {cmd}  ({secs:.1f}s, exit {code})\n{out[-3000:]}")
             if code != 0 or to:
                 return Verdict(False, name, f"{name} failed", "\n".join(log), check=rep)
-    return Verdict(True, "green", "", "\n".join(log), check=rep, new_lock=fr.new_lock, added=fr.added)
+    return Verdict(True, "green", "", "\n".join(log), check=rep)
 
 
 class Gate:
@@ -102,8 +122,8 @@ class Gate:
         self.dir = cfg.project.state_dir / "gate"
         self.dir.mkdir(parents=True, exist_ok=True)
 
-    def main_lock(self) -> dict[str, str]:
-        return frozen.load_lock(show(self.repo, self.main, self.cfg.spec.lock_file))
+    def approved(self) -> bool:
+        return not self.cfg.specify.enabled or bool(self.store.flag("spec:approved"))
 
     def submit(self, branch: str, run_id: str | None = None, message: str = "", rebase=None) -> Verdict:
         """Gate `branch`; on green main moves to the gated tree. Serialised across processes.
@@ -137,38 +157,25 @@ class Gate:
             return done(Verdict(False, "stale", "the candidate does not contain the current main; rebase it"))
         if cand == main_sha:
             return done(Verdict(False, "empty", "the candidate has no new commits"))
-        lock_path = self.cfg.spec.lock_file
-        if git(self.repo, "diff", "--name-only", main_sha, cand, "--", lock_path):
-            return done(Verdict(False, "lock", f"the candidate modifies {lock_path}; only the gate writes it"))
-        if self.cfg.spec.immutable:
-            import fnmatch
-            touched = [f for f in git(self.repo, "diff", "--name-only", main_sha, cand).splitlines()
-                       if any(fnmatch.fnmatch(f, g) for g in self.cfg.spec.immutable)]
-            if touched:
-                return done(Verdict(False, "immutable", "the candidate changes files agents may not change "
-                                    f"(spec.immutable: {', '.join(self.cfg.spec.immutable)})", "\n".join(touched)))
+        approved = self.approved()
+        touched = touched_locked(self.cfg, self.repo, main_sha, cand, approved)
+        if touched:
+            what = "spec.immutable" + (", spec.files: the specification is approved"
+                                       if self.cfg.spec.files and (approved or not self.cfg.specify.enabled) else "")
+            return done(Verdict(False, "immutable", f"the candidate changes files agents may not change ({what})",
+                                "\n".join(touched)))
         if self.cfg.gate.host != "local":
             return done(self._remote(branch, cand))
         tree = self.dir / f"tree-{gid}"
         shutil.rmtree(tree, ignore_errors=True)
         git(self.dir, "clone", "-q", "--no-hardlinks", str(self.repo), str(tree))
         git(tree, "checkout", "-q", "--detach", cand)
-        v = verify_tree(self.cfg, tree, self.main_lock(), regenerate=self.cfg.gate.regenerate)
+        v = verify_tree(self.cfg, tree, approved=approved, regenerate=self.cfg.gate.regenerate)
         if v.ok:
-            final = cand
-            # while the specification is still being drafted (loops.specify, not approved yet) nothing
-            # is locked: the draft changes freely until approval freezes it all at once
-            drafting = self.cfg.specify.enabled and not self.store.flag("spec:approved")
-            if not drafting and (v.added or v.new_lock != self.main_lock()):
-                (tree / lock_path).write_text(frozen.dump_lock(v.new_lock))
-                git(tree, "add", lock_path)
-                git(tree, "-c", "user.name=formal-factory gate", "-c", "user.email=gate@localhost",
-                    "commit", "-q", "-m", f"gate: lock {len(v.added)} new frozen statement(s)")
-                final = sha(tree, "HEAD")
-            if not self._promote(tree, final, main_sha):
+            if not self._promote(tree, cand, main_sha):
                 v = Verdict(False, "race", "main moved while gating; rebase and resubmit", v.log, v.check)
             else:
-                v.log += f"\n\nmain: {main_sha[:10]} -> {final[:10]}"
+                v.log += f"\n\nmain: {main_sha[:10]} -> {cand[:10]}"
                 shutil.rmtree(tree, ignore_errors=True)
         self._prune_trees()
         return done(v)

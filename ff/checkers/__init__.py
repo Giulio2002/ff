@@ -12,7 +12,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from ..config import Checker as CheckerConfig
-from ..frozen import collect, match_globs
+from .. import decls
+from ..globs import match_globs
 
 
 @dataclass
@@ -101,12 +102,11 @@ class Base:
     def check_file(self, root: Path, f: Path, timeout: float) -> FileResult:
         raise NotImplementedError
 
-    def extra(self, root: Path, frozen_globs: list[str]) -> list[str]:
+    def extra(self, root: Path) -> list[str]:
         """Language-specific whole-tree checks (kernel recheck, axiom audit). Returns problems."""
         return []
 
-    def check(self, root: Path, only: list[Path] | None = None, frozen_globs: list[str] | None = None,
-              full: bool = True) -> CheckReport:
+    def check(self, root: Path, only: list[Path] | None = None, full: bool = True) -> CheckReport:
         files = only if only is not None else self.files(root)
         problems = self.scan_forbidden(root, files)
         pre = self.prepare(root)
@@ -123,8 +123,8 @@ class Base:
             if r.ok and self.cfg.enforce_file_budget and r.seconds > budget:
                 r.ok = False
                 r.output += f"\nover the per-file budget: {r.seconds:.1f}s > {budget}s"
-        if full and frozen_globs is not None:
-            problems += self.extra(root, frozen_globs)
+        if full:
+            problems += self.extra(root)
         ok = not problems and all(r.ok for r in results)
         return CheckReport(ok=ok, files=results, problems=problems)
 
@@ -143,7 +143,7 @@ class Bend(Base):
             ok = False
         return FileResult(str(f), ok, secs, out, to)
 
-    def extra(self, root: Path, frozen_globs: list[str]) -> list[str]:
+    def extra(self, root: Path) -> list[str]:
         if not self.cfg.kernel_recheck:
             return []
         def verdict(f):
@@ -176,14 +176,18 @@ class Lean(Base):
         bad = code != 0 or to or re.search(r"declaration uses 'sorry'|^.*error:", out, re.M)
         return FileResult(str(f), not bad, secs, out, to)
 
-    def extra(self, root: Path, frozen_globs: list[str]) -> list[str]:
-        """#print axioms for every frozen theorem: only the allowlist may appear (no sorryAx)."""
-        theorems = [s.key for s in collect(root, frozen_globs, "lean").values()
-                    if s.text.startswith(("theorem", "lemma"))]
-        if not theorems:
+    def extra(self, root: Path) -> list[str]:
+        """#print axioms for every theorem of the checked files: only the allowlist may appear (no sorryAx)."""
+        modules, names = set(), []
+        for f in self.files(root):
+            rel = f.relative_to(root).as_posix()
+            for d in decls.lean(f.read_text(errors="replace")):
+                if d.kind in ("theorem", "lemma") and not re.match(r"^(@\[[^\]]*\]\s*)?private\b", d.block):
+                    modules.add(rel[:-len(".lean")].replace("/", "."))
+                    names.append(d.name)
+        if not names:
             return []
-        modules = sorted({k.split("::")[0][:-len(".lean")].replace("/", ".") for k in theorems})
-        names = [k.split("::")[1] for k in theorems]
+        modules = sorted(modules)
         probe = root / ".ff_axioms_probe.lean"
         probe.write_text("".join(f"import {m}\n" for m in modules) + "\n" +
                          "".join(f"#print axioms {n}\n" for n in names))
@@ -192,7 +196,11 @@ class Lean(Base):
                                        self.cfg.file_timeout_seconds * 5, self.nice)
         finally:
             probe.unlink(missing_ok=True)
-        if code != 0 or to:
+        # a name this parser got wrong (an unusual declaration form) is not the agents' fault: sorry is
+        # caught file by file anyway; any other error means the audit did not run
+        errors = [l for l in out.splitlines() if "error" in l and "unknown constant" not in l
+                  and "unknown identifier" not in l]
+        if to or (code != 0 and errors):
             return [f"axiom audit did not run:\n{out[-2000:]}"]
         problems = []
         allowed = set(self.cfg.allowed_axioms)

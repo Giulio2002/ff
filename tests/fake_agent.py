@@ -41,7 +41,7 @@ def wait_inbox(timeout=60):
 
 
 if role == "implementer":
-    if "CHEAT-WEAKEN" in task:          # weaken a frozen law: the gate must refuse
+    if "CHEAT-WEAKEN" in task:          # weaken a law of the contract: the gate must refuse
         p = wt / "proofs/laws.bend"
         p.write_text(p.read_text().replace("{I.add(a,b) == S.spec_add(a,b) : Nat}", "{I.add(a,b) == I.add(a,b) : Nat}"))
         commit("make the law easier")
@@ -78,8 +78,9 @@ elif role == "fixer":
     n = re.search(r"Finding (\d+)", task).group(1)
     if "# Rebase conflict" in task:     # resolve by redoing the change on top of the new main
         sh("git", "reset", "-q", "--hard", "main")
-    laws = wt / "proofs/laws.bend"
-    laws.write_text(laws.read_text() + f"\nlaw add_again_{n}:\n  for +a: Nat\n  for +b: Nat\n  {{I.add(a,b) == Nat.add(a,b) : Nat}}\n")
+    more = wt / "proofs/more.bend"           # the contract's laws.bend is immutable: new laws go here
+    head = "import Base\nimport ../src/add.bend as I\n" if not more.exists() else more.read_text()
+    more.write_text(head + f"\nlaw add_again_{n}:\n  for +a: Nat\n  for +b: Nat\n  {{I.add(a,b) == Nat.add(a,b) : Nat}}\n")
     g = wt / "gen.py"
     g.write_text(g.read_text().replace("EXTRA = []", f"EXTRA = []\nEXTRA.append('add_again_{n}')", 1))
     sh(sys.executable, "gen.py")

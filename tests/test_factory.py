@@ -20,7 +20,7 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from ff import frozen  # noqa: E402
+from ff import decls  # noqa: E402
 from ff.config import ConfigError, load  # noqa: E402
 from ff.factory import Factory  # noqa: E402
 
@@ -32,9 +32,10 @@ GEN = textwrap.dedent('''\
     from pathlib import Path
     EXTRA = []
     Path("src/add.bend").write_text("import Base\\n\\ndef add(a: Nat, b: Nat) -> Nat:\\n  Nat.add(b,a)\\n")
-    proofs = ["import Base", "import ./laws.bend as Laws", "", "def Laws.add_correct(a,b): {==}"]
+    proofs = ["import Base", "import ./laws.bend as Laws"] + (["import ./more.bend as More"] if EXTRA else [])
+    proofs += ["", "def Laws.add_correct(a,b): {==}"]
     for name in EXTRA:
-        proofs.append(f"def Laws.{name}(a,b): {{==}}")
+        proofs.append(f"def More.{name}(a,b): {{==}}")
     Path("proofs/proof.bend").write_text("\\n".join(proofs) + "\\n")
     ''')
 
@@ -78,7 +79,7 @@ def write_config(tmp: Path, repo: Path, **loops) -> Path:
         "generated": ["src/*.bend", "proofs/proof.bend"],
         "checker": {"bend": {"binary": BEND or "bend", "args": ["--check-only"], "files": ["proofs/proof.bend"],
                              "file_timeout_seconds": 120, "jobs": 2}},
-        "spec": {"frozen": ["spec/*.bend", "proofs/laws.bend"]},
+        "spec": {"files": ["spec/*.bend"], "immutable": ["proofs/laws.bend"]},
         "providers": {"fake": {"kind": "script", "command": [sys.executable, str(fake)]}},
         "roles": {r: {"provider": "fake", "timeout_minutes": 5} for r in
                   ["coordinator", "implementer", "auditor_mutation", "auditor_crash", "judge", "fixer", "echo"]},
@@ -96,16 +97,25 @@ def write_config(tmp: Path, repo: Path, **loops) -> Path:
 
 # ---------------------------------------------------------------- unit tests (no Bend needed)
 
-def test_frozen_statements_bend_and_lean():
-    b = frozen.bend_statements("laws.bend", "import Base\n\nlaw foo:\n  for +a: Nat\n  {a == a : Nat}\n\ndef bar(x):\n  x\n")
-    assert [s.key for s in b] == ["laws.bend::foo", "laws.bend::bar"]
+def test_declarations_bend_and_lean():
+    b = decls.bend("import Base\n\nlaw foo:\n  for +a: Nat\n  {a == a : Nat}\n\ndef bar(x):\n  x\n")
+    assert [(d.kind, d.name) for d in b] == [("law", "foo"), ("def", "bar")]
     lean = "theorem t (n : Nat) : n + 0 = n := by\n  simp\n\ndef f (n : Nat) : Nat := n\n"
-    l1 = frozen.lean_statements("A.lean", lean)
-    l2 = frozen.lean_statements("A.lean", lean.replace("simp", "omega"))
-    assert {s.key: s.digest for s in l1}["A.lean::t"] == {s.key: s.digest for s in l2}["A.lean::t"], \
-        "changing a proof must not change the statement"
-    l3 = frozen.lean_statements("A.lean", lean.replace("n + 0 = n", "n + 0 = n ∨ True"))
-    assert {s.key: s.digest for s in l1}["A.lean::t"] != {s.key: s.digest for s in l3}["A.lean::t"]
+    l1, l2 = decls.lean(lean), decls.lean(lean.replace("simp", "omega"))
+    assert l1[0].statement == l2[0].statement, "a theorem's statement does not include its proof"
+    assert l1[0].block != l2[0].block
+
+
+def test_old_frozen_configs_are_refused_with_a_way_forward(tmp_path):
+    repo = tmp_path / "r"
+    repo.mkdir()
+    p = write_config(tmp_path, repo)
+    import yaml
+    c = yaml.safe_load(p.read_text())
+    c["spec"] = {"frozen": ["spec/*.bend"]}
+    p.write_text(yaml.safe_dump(c))
+    with pytest.raises(ConfigError, match="spec.files"):
+        load(p)
 
 
 def test_config_validation(tmp_path):
@@ -135,15 +145,12 @@ def test_examples_load(tmp_path, monkeypatch):
 def test_gate_refuses_cheats_and_accepts_the_generator_fix(tmp_path):
     repo = make_project(tmp_path)
     f = Factory.from_path(write_config(tmp_path, repo))
-    # freeze the spec (the human step)
-    from ff.cli import main as ff
-    assert ff(["--config", str(f.cfg.path), "freeze", "--yes"]) == 0
     from ff.loops import ImplementLoop
     loop = ImplementLoop(f)
     weak = loop.cycle("implementer", "CHEAT-WEAKEN", max_attempts=1)
     assert not weak.ok
     reds = f.store.q("SELECT reason FROM gates WHERE status = 'red'")
-    assert any("frozen" in r["reason"] for r in reds), [dict(r) for r in reds]
+    assert any("may not change" in r["reason"] for r in reds), [dict(r) for r in reds]
     hand = loop.cycle("implementer", "CHEAT-HANDEDIT", max_attempts=1)
     assert not hand.ok
     assert any("generated files differ" in r["reason"] for r in f.store.q("SELECT reason FROM gates WHERE status = 'red'"))
@@ -159,8 +166,6 @@ def test_audit_round_judge_fix_and_evidence(tmp_path):
                                                                         "crash": "auditor_crash"},
                                             "fixers": 2, "confirm_each_round": False, "max_rounds": 1})
     f = Factory.from_path(p)
-    from ff.cli import main as ff
-    assert ff(["--config", str(p), "freeze", "--yes"]) == 0
     from ff.loops import AuditLoop
     loop = AuditLoop(f)
     f.store.x("INSERT INTO briefs (loop, text, status, ts) VALUES ('audit', 'FOCUS-ON-THE-GLUE', 'open', 0)")
@@ -175,8 +180,7 @@ def test_audit_round_judge_fix_and_evidence(tmp_path):
     assert rows["mutation: hand-built object"] == "documented"
     main_files = git(repo, "ls-tree", "-r", "--name-only", "main")
     assert "EVIDENCE.md" in main_files and "KNOWN_LIMITATIONS.md" in main_files
-    lock = json.loads(git(repo, "show", "main:frozen.lock.json"))["statements"]
-    assert any("add_again_" in k for k in lock), "the fixers' new laws are locked by the gate"
+    assert "law add_again_" in git(repo, "show", "main:proofs/more.bend"), "the fixers' new laws are on main"
 
 
 # ---------------------------------------------------------------- steering (no Bend needed)
@@ -435,8 +439,6 @@ def test_a_restarted_daemon_adopts_a_run_that_is_still_going(tmp_path):
     c["providers"]["slow"] = {"kind": "script", "command": ["sh", "-c", f"sleep 6; exec {sys.executable} {ROOT / 'tests/fake_agent.py'}"]}
     c["roles"]["implementer"]["provider"] = "slow"
     p.write_text(yaml.safe_dump(c))
-    from ff.cli import main as ff
-    assert ff(["--config", str(p), "freeze", "--yes"]) == 0
     f1 = Factory.from_path(p)
     from ff.loops import ImplementLoop
     loop1 = ImplementLoop(f1)
@@ -562,8 +564,6 @@ def test_a_restart_resumes_the_audit_round_and_remembers_the_answer(tmp_path):
     p = write_config(tmp_path, repo, audit={"enabled": True, "flavors": {"mutation": "auditor_mutation"},
                                             "fixers": 1, "confirm_each_round": True, "max_rounds": 3})
     f = Factory.from_path(p)
-    from ff.cli import main as ff
-    assert ff(["--config", str(p), "freeze", "--yes"]) == 0
     # a previous daemon died in round 1's fixing stage with one finding still to fix
     main = git(repo, "rev-parse", "main")
     f.store.x("INSERT INTO rounds (n, started, base_commit, status) VALUES (1, ?, ?, 'fixing')", (time.time(), main))
@@ -620,8 +620,6 @@ def test_a_resumed_round_waits_for_its_adopted_fix_cycles(tmp_path):
     p = write_config(tmp_path, repo, audit={"enabled": True, "flavors": {"mutation": "auditor_mutation"},
                                             "fixers": 2, "confirm_each_round": True, "max_rounds": 3})
     f = Factory.from_path(p)
-    from ff.cli import main as ff
-    assert ff(["--config", str(p), "freeze", "--yes"]) == 0
     main = git(repo, "rev-parse", "main")
     f.store.x("INSERT INTO rounds (n, started, base_commit, status) VALUES (1, ?, ?, 'fixing')", (time.time(), main))
     from ff.loops import AuditLoop
@@ -643,8 +641,6 @@ def test_the_evidence_commit_rebases_when_main_moved(tmp_path, monkeypatch):
     repo = make_project(tmp_path, bug=False)
     p = write_config(tmp_path, repo, audit={"enabled": True, "flavors": {"mutation": "auditor_mutation"}})
     f = Factory.from_path(p)
-    from ff.cli import main as ff
-    assert ff(["--config", str(p), "freeze", "--yes"]) == 0
     from ff.loops import AuditLoop
     loop = AuditLoop(f)
     real = f.gate.submit
@@ -669,8 +665,6 @@ def test_the_gate_rebases_a_stale_candidate_under_its_lock(tmp_path):
     repo = make_project(tmp_path, bug=False)
     p = write_config(tmp_path, repo)
     f = Factory.from_path(p)
-    from ff.cli import main as ff
-    assert ff(["--config", str(p), "freeze", "--yes"]) == 0
     trees = []
     for name in ("one", "two"):      # two fixes made on the same main
         wt, br = f.ws.create(name)
@@ -691,8 +685,6 @@ def test_a_restart_adopts_a_cycle_whose_agent_is_done_but_not_gated(tmp_path, mo
     repo = make_project(tmp_path)
     p = write_config(tmp_path, repo, implement={"enabled": True, "max_attempts": 2,
                                                 "backlog_command": "cat TODO.txt"})
-    from ff.cli import main as ff
-    assert ff(["--config", str(p), "freeze", "--yes"]) == 0
     f1 = Factory.from_path(p)
     from ff.loops import ImplementLoop
     loop1 = ImplementLoop(f1)
@@ -839,6 +831,7 @@ def test_agents_draft_the_spec_a_human_approves_it_then_implementation_starts(tm
         "cat >/dev/null; mkdir -p spec && echo 'the add rule' > spec/notes.md && git add -A && "
         "git -c user.name=a -c user.email=a@x commit -qm 'spec: notes' && echo drafted"]}
     c["roles"]["specifier"] = {"provider": "drafter", "timeout_minutes": 1}
+    c["spec"]["files"] = ["spec/**"]
     c["loops"]["specify"] = {"enabled": True, "workers": 1,
                              "backlog_command": "test -f spec/notes.md || printf 'spec:notes\\twrite the notes\\n'"}
     c["loops"]["implement"] = {"enabled": True, "backlog_command": "printf 'law:x\\n'"}
@@ -853,8 +846,6 @@ def test_agents_draft_the_spec_a_human_approves_it_then_implementation_starts(tm
     spec.stop.wait = lambda t=None: False
     spec.worker(0)                                   # drafts spec/notes.md through the gate
     assert "spec/notes.md" in git(repo, "ls-tree", "-r", "--name-only", "main")
-    assert "frozen.lock.json" not in git(repo, "ls-tree", "-r", "--name-only", "main"), \
-        "nothing is locked while the specification is a draft"
     assert f.store.q("SELECT status FROM backlog WHERE item = 'spec:notes'")[0]["status"] == "done"
     spec.worker(0)                                   # backlog empty: asks the human
     d = f.store.q("SELECT id, question FROM decisions WHERE answer IS NULL")
@@ -862,7 +853,11 @@ def test_agents_draft_the_spec_a_human_approves_it_then_implementation_starts(tm
     f.store.x("UPDATE decisions SET answer = 'approve' WHERE id = ?", (d[0]["id"],))
     spec.worker(0)
     assert f.store.flag("spec:approved")
-    assert "frozen.lock.json" in git(repo, "ls-tree", "-r", "--name-only", "main")
+    wt, br = f.ws.create("rewrite-the-spec")          # approved: the specification cannot change any more
+    (wt / "spec/notes.md").write_text("an easier rule\n")
+    f.ws.commit_pending(wt, "easier spec")
+    v = f.gate.submit(br)
+    assert not v.ok and v.stage == "immutable" and "spec/notes.md" in v.log
     assert spec.worker(0) is False, "the specify loop is finished once approved"
     impl.take()
     assert f.store.q("SELECT loop FROM backlog WHERE item = 'law:x'")[0]["loop"] == "implement"
@@ -925,8 +920,6 @@ def test_the_gate_refuses_ffi(tmp_path):
     repo = make_project(tmp_path, bug=False)
     p = write_config(tmp_path, repo)
     f = Factory.from_path(p)
-    from ff.cli import main as ff
-    assert ff(["--config", str(p), "freeze", "--yes"]) == 0
     wt, br = f.ws.create("sneaky")
     (wt / "ffi.bend").write_text('def Fast.add(a: u32) -> IO(u32):\n  import "./fast.c"\n')
     f.ws.commit_pending(wt, "fast path in C")
@@ -947,8 +940,6 @@ def test_the_gate_refuses_changes_to_the_harness(tmp_path):
     c["spec"]["immutable"] = ["tools/**"]
     p.write_text(yaml.safe_dump(c))
     f = Factory.from_path(p)
-    from ff.cli import main as ff
-    assert ff(["--config", str(p), "freeze", "--yes"]) == 0
     wt, br = f.ws.create("faster-bench")
     (wt / "tools/bench.py").write_text("print(0.1)\n")
     f.ws.commit_pending(wt, "a faster benchmark")
@@ -981,7 +972,7 @@ def test_optimize_waits_for_the_implementation(tmp_path):
 
 
 @needs_bend
-def test_auto_approval_freezes_the_spec_without_asking(tmp_path):
+def test_auto_approval_approves_the_spec_without_asking(tmp_path):
     repo = make_project(tmp_path, bug=False)
     p = write_config(tmp_path, repo)
     import yaml
@@ -994,17 +985,14 @@ def test_auto_approval_freezes_the_spec_without_asking(tmp_path):
     spec = SpecifyLoop(f)
     spec.stop.wait = lambda t=None: False
     spec.worker(0)
-    spec.ask_for_approval()                       # a second worker arriving late: no second freeze
+    spec.ask_for_approval()                       # a second worker arriving late: no second approval
     assert f.store.flag("spec:approved") and not f.store.q("SELECT 1 FROM decisions")
-    assert len([e for e in f.store.events() if e["kind"] == "frozen"]) == 1
-    assert "frozen.lock.json" in git(repo, "ls-tree", "-r", "--name-only", "main")
+    assert len([e for e in f.store.events() if e["kind"] == "spec-approved"]) == 1
 
 
-def test_lean_statements_carry_their_namespace():
-    from ff.frozen import lean_statements
+def test_lean_declarations_carry_their_namespace():
     src = "namespace A.B\ntheorem t : 1 = 1 := rfl\nsection\ndef d := 1\nend\nend A.B\ntheorem _root_.u : True := trivial\ntheorem v : 2 = 2 := rfl\n"
-    keys = [s.key for s in lean_statements("X.lean", src)]
-    assert keys == ["X.lean::A.B.t", "X.lean::A.B.d", "X.lean::u", "X.lean::v"], keys
+    assert [d.name for d in decls.lean(src)] == ["A.B.t", "A.B.d", "u", "v"]
 
 
 def test_a_kept_experiment_s_measurement_is_main_s_baseline(tmp_path):

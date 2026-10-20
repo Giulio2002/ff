@@ -172,41 +172,9 @@ class Factory:
             self.store.event("factory", "repo", d)
         return did
 
-    def freeze(self, force: bool = False) -> int:
-        """Lock the current frozen statements on main (the human approving the specification).
-        Returns how many statements were locked."""
-        import fcntl
-        import shutil
-        from . import frozen
-        cfg = self.cfg
-        repo, main = cfg.project.repo, cfg.project.main_branch
-        if git(repo, "show", f"{main}:{cfg.spec.lock_file}", check=False) and not force:
-            raise RuntimeError(f"{cfg.spec.lock_file} already exists on {main}")
-        with self.main_view("freeze") as view:
-            stmts = frozen.collect(view, cfg.spec.frozen, cfg.project.language)
-        tmp = cfg.project.state_dir / "freeze"
-        shutil.rmtree(tmp, ignore_errors=True)
-        git(repo, "worktree", "add", "-q", "--detach", str(tmp), main)
-        try:
-            (tmp / cfg.spec.lock_file).write_text(frozen.dump_lock(frozen.lock_of(stmts)))
-            git(tmp, "add", cfg.spec.lock_file)
-            git(tmp, "-c", "user.name=formal-factory", "-c", "user.email=factory@localhost", "commit", "-q",
-                "--allow-empty", "-m", f"freeze {len(stmts)} statements")
-            new = git(tmp, "rev-parse", "HEAD")
-            with open(self.gate.dir / "gate.lock", "w") as lk:     # main moves only under the gate's lock
-                fcntl.flock(lk, fcntl.LOCK_EX)
-                if not is_ancestor(repo, sha(repo, main), new):
-                    raise RuntimeError("main moved while freezing; try again")
-                if git(repo, "symbolic-ref", "-q", "HEAD", check=False) == f"refs/heads/{main}":
-                    git(repo, "reset", "-q", "--keep", new)
-                else:
-                    git(repo, "update-ref", f"refs/heads/{main}", new)
-                if cfg.project.remote:
-                    git(repo, "push", "-q", cfg.project.remote, f"{main}:{main}", check=False)
-        finally:
-            git(repo, "worktree", "remove", "--force", str(tmp), check=False)
-        self.store.event("factory", "frozen", f"locked {len(stmts)} statements on {main}")
-        return len(stmts)
+    def spec_approved(self) -> bool:
+        """The specification is settled: approved, or not drafted by agents at all."""
+        return not self.cfg.specify.enabled or bool(self.store.flag("spec:approved"))
 
     def start_loops(self, names: list[str] | None = None) -> None:
         from .loops import LOOPS

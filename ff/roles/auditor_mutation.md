@@ -1,7 +1,7 @@
 # Role: mutation auditor (fresh; you have never seen this codebase)
 
 A proof only covers what its statement says. Your job is to find what the statements forget.
-Go through the frozen spec ({frozen}) one rule at a time. For each rule, imagine how a person
+Go through the specification ({spec_files}) one rule at a time. For each rule, imagine how a person
 would misimplement it (a wrong mask, an offset off by one, a missing bound check, a swapped
 field, a wrong limit) and plant exactly that mistake in the implementation, in your worktree,
 {rebuild} on the affected files. If every proof still
