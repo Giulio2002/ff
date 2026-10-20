@@ -1015,3 +1015,49 @@ def test_a_kept_experiment_s_measurement_is_main_s_baseline(tmp_path):
     git(repo, "-c", "user.name=t", "-c", "user.email=t@x", "commit", "-q", "-m", "other code")
     opt.reuse_measurement(measured, 2.0)
     assert f.store.flag("baseline:" + git(repo, "rev-parse", "main")) is None, "different code is measured again"
+
+
+def test_adopted_cycles_never_add_workers_beyond_the_configuration(tmp_path):
+    repo = make_project(tmp_path, bug=False)
+    p = write_config(tmp_path, repo)
+    import yaml
+    c = yaml.safe_load(p.read_text())
+    c["benchmark"] = {"command": "echo 9", "target": 3, "repeats": 1}
+    c["roles"]["optimizer"] = {"provider": "fake"}
+    c["loops"]["optimize"] = {"enabled": True, "workers": 1}
+    p.write_text(yaml.safe_dump(c))
+    f = Factory.from_path(p)
+    from ff.loops import Loop
+
+    class Probe(Loop):
+        name = "optimize"
+        seen: set = set()
+
+        def adopt(self, row):
+            time.sleep(row["d"])
+
+        def worker(self, i):
+            self.seen.add(threading.current_thread().name)
+            self.stop.wait(30)
+
+    loop = Probe(f)
+    # a restart found two cycles of the loop still going, with one worker configured
+    loop.adopt_in_thread({"id": "a", "d": 0.0})
+    loop.adopt_in_thread({"id": "b", "d": 0.6})
+    loop.start(max(0, 1 - 2))
+    time.sleep(1.5)
+    assert len(loop.seen) == 1, f"one worker, not {sorted(loop.seen)}"
+    loop.stop.set()
+
+
+def test_a_run_stopped_at_restart_is_not_adopted_by_the_next_restart(tmp_path):
+    repo = make_project(tmp_path, bug=False)
+    f = Factory.from_path(write_config(tmp_path, repo))
+    f.store.x("INSERT INTO runs (id, loop, role, status, started, pid, cycle, worktree) VALUES "
+              "('optimizer-x', 'optimize', 'optimizer', 'running', ?, 999999999, '{\"loop\": \"optimize\"}', ?)",
+              (time.time(), str(tmp_path)))
+    f.store.set_flag("cycle-open:optimizer-x", "1")
+    adopted, stopped = f.reconcile({})                # its process is gone: stopped
+    assert stopped == ["optimizer-x"] and not adopted
+    assert f.store.flag("cycle-open:optimizer-x") is None
+    assert f.reconcile({"optimize": object()}) == ([], []), "a stopped run's cycle is over"

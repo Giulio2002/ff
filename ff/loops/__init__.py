@@ -38,6 +38,14 @@ class Loop:
         self.f, self.cfg, self.store = f, f.cfg, f.store
         self.stop = threading.Event()
         self.threads: list[threading.Thread] = []
+        self._active = 0                      # threads working as this loop's workers right now
+        self._active_lock = threading.Lock()
+
+    @property
+    def wanted(self) -> int:
+        """How many workers the configuration asks for."""
+        lc = getattr(self.cfg, self.name, None)
+        return max(1, int(getattr(lc, "workers", 1) or 1))
 
     def log(self, kind: str, msg: str, run_id: str | None = None, **data) -> None:
         self.store.event(self.name, kind, msg, run_id, **data)
@@ -54,14 +62,24 @@ class Loop:
             t.start()
             self.threads.append(t)
 
-    def _guard(self, i: int) -> None:
-        while not self.stop.is_set():
-            try:
-                if self.worker(i) is False:
-                    return
-            except Exception as e:  # keep the loop alive; tell the coordinator
-                self.log("error", f"{self.name} worker {i} crashed: {e!r}; restarting in 60s")
-                self.stop.wait(60)
+    def _guard(self, i: int, adopted: bool = False) -> None:
+        with self._active_lock:
+            # a thread that finished an adopted cycle carries on as a worker only into a free place:
+            # the loop never runs more workers than the configuration asks for
+            if adopted and self._active >= self.wanted:
+                return
+            self._active += 1
+        try:
+            while not self.stop.is_set():
+                try:
+                    if self.worker(i) is False:
+                        return
+                except Exception as e:  # keep the loop alive; tell the coordinator
+                    self.log("error", f"{self.name} worker {i} crashed: {e!r}; restarting in 60s")
+                    self.stop.wait(60)
+        finally:
+            with self._active_lock:
+                self._active -= 1
 
     def worker(self, i: int):
         raise NotImplementedError
@@ -175,7 +193,7 @@ class Loop:
                 import traceback
                 self.log("error", f"adopting {row['id']} failed: {e!r}\n{traceback.format_exc()[-1500:]}", row["id"])
             if self.name != "audit":
-                self._guard(len(self.threads))
+                self._guard(len(self.threads), adopted=True)
         t = threading.Thread(target=go, name=f"{self.name}-adopt-{row['id']}", daemon=True)
         t.start()
         self.threads.append(t)

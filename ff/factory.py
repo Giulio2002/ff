@@ -118,6 +118,7 @@ class Factory:
                     pass
             self.store.run_update(r["id"], status="stopped", ended=time.time(),
                                   summary=(r["summary"] or "") + " [stopped: its daemon was restarted]")
+            self.store.set_flag(f"cycle-open:{r['id']}", None)   # its cycle is over: never adopt it later
             stopped.append(r["id"])
         adopted_items = {json.loads(r["cycle"] or "{}").get("item") for r in self.store.q(
             "SELECT cycle FROM runs WHERE id IN (%s)" % ",".join("?" * len(adopted)), adopted)} if adopted else set()
