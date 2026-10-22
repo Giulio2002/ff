@@ -32,7 +32,7 @@ from .checkers import CheckReport, make, run_cmd
 from .config import Config
 from .git import git, is_ancestor, sha
 from .globs import in_globs
-from .quiet import wait_quiet
+from .quiet import timed_work, wait_quiet
 from .store import Store
 
 
@@ -171,8 +171,9 @@ class Gate:
         shutil.rmtree(tree, ignore_errors=True)
         git(self.dir, "clone", "-q", "--no-hardlinks", str(self.repo), str(tree))
         git(tree, "checkout", "-q", "--detach", cand)
-        self._wait_quiet(gid, run_id)
-        v = verify_tree(self.cfg, tree, approved=approved, regenerate=self.cfg.gate.regenerate)
+        with timed_work():
+            self._wait_quiet(gid, run_id)
+            v = verify_tree(self.cfg, tree, approved=approved, regenerate=self.cfg.gate.regenerate)
         if v.ok:
             if not self._promote(tree, cand, main_sha):
                 v = Verdict(False, "race", "main moved while gating; rebase and resubmit", v.log, v.check)

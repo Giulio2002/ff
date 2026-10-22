@@ -5,8 +5,13 @@ time, so whatever else runs on the machine (agents building, another factory's g
 stretches them. Before either starts, the factory waits until the CPUs are mostly idle."""
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import os
 import time
+
+# one holder at a time across every factory on the machine: a gate's checks or one benchmark run
+TIMED_LOCK = os.environ.get("FF_TIMED_LOCK", "/var/tmp/ff-timed.lock")
 
 
 def _cpu_times() -> tuple[int, int]:
@@ -41,3 +46,15 @@ def wait_quiet(max_busy_pct: float, max_wait_seconds: float, sample_seconds: flo
             return True, waited, pct
         if waited >= max_wait_seconds or (stop is not None and stop()):
             return False, waited, pct
+
+
+@contextlib.contextmanager
+def timed_work():
+    """Hold the machine-wide lock for timed work (the gate's checks, a benchmark run), so two of them
+    (from this factory or another) never overlap; the quiet wait then covers everything else."""
+    with open(TIMED_LOCK, "a") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(f, fcntl.LOCK_UN)

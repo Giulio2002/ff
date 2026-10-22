@@ -17,7 +17,7 @@ from ..agents import RunResult, new_run_id
 from ..checkers import run_cmd
 from ..gate import harness_env
 from ..git import git, is_ancestor, sha
-from ..quiet import wait_quiet
+from ..quiet import timed_work, wait_quiet
 
 if TYPE_CHECKING:
     from ..factory import Factory
@@ -432,12 +432,13 @@ class OptimizeLoop(Loop):
         b, g = self.cfg.benchmark, self.cfg.gate
         vals = []
         for _ in range(max(1, b.repeats)):
-            quiet, waited, pct = wait_quiet(g.quiet_cpu_pct, g.quiet_max_wait_minutes * 60)
-            if waited >= 1:
-                self.log("bench-wait", f"benchmark in {root.name} waited {waited / 60:.1f} min for a quiet machine"
-                         + ("" if quiet else f"; still {pct:.0f}% busy, measuring anyway"))
-            code, out, _, to = run_cmd(b.command, root, b.timeout_minutes * 60, self.cfg.limits.nice,
-                                       env=harness_env(self.f.spec_approved()))
+            with timed_work():
+                quiet, waited, pct = wait_quiet(g.quiet_cpu_pct, g.quiet_max_wait_minutes * 60)
+                if waited >= 1:
+                    self.log("bench-wait", f"benchmark in {root.name} waited {waited / 60:.1f} min for a quiet machine"
+                             + ("" if quiet else f"; still {pct:.0f}% busy, measuring anyway"))
+                code, out, _, to = run_cmd(b.command, root, b.timeout_minutes * 60, self.cfg.limits.nice,
+                                           env=harness_env(self.f.spec_approved()))
             m = re.search(b.metric, out)
             if code != 0 or to or not m:
                 self.log("bench-error", f"benchmark failed in {root.name}: {out[-400:]}")
