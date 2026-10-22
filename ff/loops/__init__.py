@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING
 from ..agents import RunResult, new_run_id
 from ..checkers import run_cmd
 from ..gate import harness_env
-from ..git import git, sha
+from ..git import git, is_ancestor, sha
 from ..quiet import wait_quiet
 
 if TYPE_CHECKING:
@@ -532,10 +532,19 @@ class OptimizeLoop(Loop):
             seen["commit"] = sha(wt, "HEAD")
             if cand is None:
                 return False, "benchmark failed on the candidate"
-            gain = self.better(base, cand)
+            # main may have moved during the run (a merge, a harness change): a candidate built on the new
+            # main is compared with the new main's number, not with the one the run started from
+            ref = base
+            main = sha(self.cfg.project.repo, self.cfg.project.main_branch)
+            if is_ancestor(self.cfg.project.repo, main, seen["commit"]):
+                now = self.baseline()
+                if now is not None:
+                    ref = now
+            seen["ref"] = ref
+            gain = self.better(ref, cand)
             seen["gain"] = gain
             if gain < self.cfg.benchmark.min_improvement_pct:
-                return False, f"not faster enough: {base} -> {cand} ({gain:+.2f}%)"
+                return False, f"not faster enough: {ref} -> {cand} ({gain:+.2f}%)"
             return True, ""
 
         out = self.cycle(self.cfg.optimize.role, task, max_attempts=2, result_extra=', "idea": "<one line>"',
@@ -547,7 +556,7 @@ class OptimizeLoop(Loop):
         idea = (out.result or {}).get("idea") or out.summary[:200]
         reason = out.summary if not out.ok else f"{seen.get('gain', 0):+.2f}%"
         self.store.x("INSERT INTO experiments (run_id, idea, baseline, candidate, kept, reason, ts) VALUES (?,?,?,?,?,?,?)",
-                     (out.run_ids[-1] if out.run_ids else None, idea, base, seen.get("cand"), int(out.ok),
+                     (out.run_ids[-1] if out.run_ids else None, idea, seen.get("ref", base), seen.get("cand"), int(out.ok),
                       reason[:500], time.time()))
         self.log("experiment-kept" if out.ok else "experiment-reverted", f"{idea[:150]}: {reason[:200]}",
                  out.run_ids[-1] if out.run_ids else None)
