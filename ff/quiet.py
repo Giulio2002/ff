@@ -151,3 +151,25 @@ def timed_work(pause_agents: bool = True):
                 yield
         finally:
             fcntl.flock(f, fcntl.LOCK_UN)
+
+
+def reap_stale_freeze() -> bool:
+    """If agents are recorded as frozen but nobody holds the timed-work lock (the holder died, e.g.
+    killed), resume them now. Returns True if it resumed any. Cheap: the daemons call it often."""
+    if not os.path.exists(FROZEN_FILE):
+        return False
+    try:
+        with open(TIMED_LOCK, "a") as f:
+            try:
+                fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return False          # a live holder: it resumes them itself
+            try:
+                if not os.path.exists(FROZEN_FILE):
+                    return False
+                resume_frozen()
+                return True
+            finally:
+                fcntl.flock(f, fcntl.LOCK_UN)
+    except OSError:
+        return False

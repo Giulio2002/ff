@@ -251,8 +251,12 @@ def cmd_run(a):
     stop = []
     signal.signal(signal.SIGTERM, lambda *_: stop.append(1))
     try:
+        from .quiet import reap_stale_freeze
         while not stop and any(t.is_alive() for l in f.loops.values() for t in l.threads):
             f.maybe_reload()
+            if reap_stale_freeze():
+                f.store.event("gate", "freeze-reaped", "agents were left paused by a timed-work holder that died; "
+                                                       "resumed them")
             time.sleep(5)
     except KeyboardInterrupt:
         pass
