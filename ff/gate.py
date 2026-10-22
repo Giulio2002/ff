@@ -32,6 +32,7 @@ from .checkers import CheckReport, make, run_cmd
 from .config import Config
 from .git import git, is_ancestor, sha
 from .globs import in_globs
+from .quiet import wait_quiet
 from .store import Store
 
 
@@ -170,6 +171,7 @@ class Gate:
         shutil.rmtree(tree, ignore_errors=True)
         git(self.dir, "clone", "-q", "--no-hardlinks", str(self.repo), str(tree))
         git(tree, "checkout", "-q", "--detach", cand)
+        self._wait_quiet(gid, run_id)
         v = verify_tree(self.cfg, tree, approved=approved, regenerate=self.cfg.gate.regenerate)
         if v.ok:
             if not self._promote(tree, cand, main_sha):
@@ -179,6 +181,16 @@ class Gate:
                 shutil.rmtree(tree, ignore_errors=True)
         self._prune_trees()
         return done(v)
+
+    def _wait_quiet(self, gid: int, run_id: str | None) -> None:
+        """The checker's time limit is wall-clock time: wait until the machine is quiet first."""
+        g = self.cfg.gate
+        quiet, waited, pct = wait_quiet(g.quiet_cpu_pct, g.quiet_max_wait_minutes * 60)
+        if waited >= 1:
+            self.store.event("gate", "gate-wait",
+                             f"gate #{gid} waited {waited / 60:.1f} min for a quiet machine"
+                             + ("" if quiet else f"; still {pct:.0f}% busy (limit {g.quiet_cpu_pct:.0f}%), "
+                                                 "checking anyway"), run_id)
 
     def _promote(self, tree: Path, final: str, expected_main: str) -> bool:
         git(self.repo, "fetch", "-q", str(tree), f"{final}:refs/ff/gated/{final[:12]}")

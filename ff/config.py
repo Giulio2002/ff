@@ -166,6 +166,10 @@ class Gate:
     cold: bool = True              # fresh clone, no caches
     regenerate: bool = True
     keep_failed_trees: int = 5
+    # timed work (the checker's per-file limit, the benchmark) waits until at most this share of the
+    # CPUs is busy, for up to quiet_max_wait_minutes, then runs anyway; 0 turns the wait off
+    quiet_cpu_pct: float = 25
+    quiet_max_wait_minutes: float = 30
 
 
 @dataclass
