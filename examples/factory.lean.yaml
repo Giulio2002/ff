@@ -53,6 +53,7 @@ gate:
   cold: true
   quiet_cpu_pct: 25               # the checker and the benchmark wait until at most this % of CPUs is busy
   quiet_max_wait_minutes: 30      # ... for at most this long, then run anyway (0 above turns the wait off)
+  pause_agents: true              # timed work (one machine-wide lock) pauses every agent and runs at normal priority
 
 # Subscription rotation: `ff add_login claude` / `ff add_login codex` put logins in ~/.formal-agents.
 # Claude Code and Codex providers draw from that pool (accounts: auto); when an account runs out of

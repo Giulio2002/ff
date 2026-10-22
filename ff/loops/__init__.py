@@ -432,12 +432,13 @@ class OptimizeLoop(Loop):
         b, g = self.cfg.benchmark, self.cfg.gate
         vals = []
         for _ in range(max(1, b.repeats)):
-            with timed_work():
+            with timed_work(g.pause_agents):
                 quiet, waited, pct = wait_quiet(g.quiet_cpu_pct, g.quiet_max_wait_minutes * 60)
                 if waited >= 1:
                     self.log("bench-wait", f"benchmark in {root.name} waited {waited / 60:.1f} min for a quiet machine"
                              + ("" if quiet else f"; still {pct:.0f}% busy, measuring anyway"))
-                code, out, _, to = run_cmd(b.command, root, b.timeout_minutes * 60, self.cfg.limits.nice,
+                code, out, _, to = run_cmd(b.command, root, b.timeout_minutes * 60,
+                                           0 if g.pause_agents else self.cfg.limits.nice,
                                            env=harness_env(self.f.spec_approved()))
             m = re.search(b.metric, out)
             if code != 0 or to or not m:

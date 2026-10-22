@@ -170,6 +170,9 @@ class Gate:
     # CPUs is busy, for up to quiet_max_wait_minutes, then runs anyway; 0 turns the wait off
     quiet_cpu_pct: float = 25
     quiet_max_wait_minutes: float = 30
+    # while timed work runs (one machine-wide lock), every agent on the machine is paused (SIGSTOP)
+    # and the work runs at normal priority, not limits.nice
+    pause_agents: bool = True
 
 
 @dataclass

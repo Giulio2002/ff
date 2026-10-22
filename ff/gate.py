@@ -67,9 +67,11 @@ def touched_locked(cfg: Config, root: Path, base: str, head: str | None, approve
 
 
 def verify_tree(cfg: Config, root: Path, *, approved: bool, base: str | None = None, regenerate: bool = True,
-                only: list[str] | None = None, run_tests: bool = True, full: bool = True) -> Verdict:
+                only: list[str] | None = None, run_tests: bool = True, full: bool = True,
+                nice: int | None = None) -> Verdict:
     """The gate's checks on the tree at `root`. With `base` (a commit, e.g. main), also that the
     working tree changes nothing agents may not change."""
+    nice = cfg.limits.nice if nice is None else nice
     log = []
     if base:
         bad = touched_locked(cfg, root, base, None, approved)
@@ -79,7 +81,7 @@ def verify_tree(cfg: Config, root: Path, *, approved: bool, base: str | None = N
                               (approved or not cfg.specify.enabled) else "") + ")", "\n".join(bad))
     if regenerate and cfg.project.workflow == "generators" and cfg.commands.get("regenerate"):
         before = git(root, "status", "--porcelain", "--untracked-files=all", check=False)
-        code, out, secs, _ = run_cmd(cfg.commands["regenerate"], root, 3600, cfg.limits.nice)
+        code, out, secs, _ = run_cmd(cfg.commands["regenerate"], root, 3600, nice)
         log.append(f"$ {cfg.commands['regenerate']}  ({secs:.1f}s, exit {code})\n{out[-4000:]}")
         if code != 0:
             return Verdict(False, "regenerate", "the generators failed", "\n".join(log))
@@ -89,7 +91,7 @@ def verify_tree(cfg: Config, root: Path, *, approved: bool, base: str | None = N
             return Verdict(False, "regenerate", "generated files differ from what was committed "
                            "(edit the generators, not their output, and commit the regenerated files)",
                            "\n".join(log) + "\n" + after + "\n" + diff)
-    checker = make(cfg.project.language, cfg.checker, cfg.limits.nice)
+    checker = make(cfg.project.language, cfg.checker, nice)
     from .ffi import violations
     bad = violations(root, cfg.project.language, cfg.ffi.allow)
     if bad:
@@ -108,7 +110,7 @@ def verify_tree(cfg: Config, root: Path, *, approved: bool, base: str | None = N
             cmd = cfg.commands.get(name)
             if not cmd:
                 continue
-            code, out, secs, to = run_cmd(cmd, root, 7200, cfg.limits.nice, env=harness_env(approved))
+            code, out, secs, to = run_cmd(cmd, root, 7200, nice, env=harness_env(approved))
             log.append(f"$ {cmd}  ({secs:.1f}s, exit {code})\n{out[-3000:]}")
             if code != 0 or to:
                 return Verdict(False, name, f"{name} failed", "\n".join(log), check=rep)
@@ -171,9 +173,11 @@ class Gate:
         shutil.rmtree(tree, ignore_errors=True)
         git(self.dir, "clone", "-q", "--no-hardlinks", str(self.repo), str(tree))
         git(tree, "checkout", "-q", "--detach", cand)
-        with timed_work():
+        paused = self.cfg.gate.pause_agents
+        with timed_work(paused):
             self._wait_quiet(gid, run_id)
-            v = verify_tree(self.cfg, tree, approved=approved, regenerate=self.cfg.gate.regenerate)
+            v = verify_tree(self.cfg, tree, approved=approved, regenerate=self.cfg.gate.regenerate,
+                            nice=0 if paused else None)
         if v.ok:
             if not self._promote(tree, cand, main_sha):
                 v = Verdict(False, "race", "main moved while gating; rebase and resubmit", v.log, v.check)
