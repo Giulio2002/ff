@@ -112,6 +112,9 @@ class Checker:
     kernel_recheck: bool = False                         # bend: also run --verdict in the gate
     forbid: list[str] = field(default_factory=list)      # regexes rejected anywhere in checked files
     allowed_axioms: list[str] = field(default_factory=list)  # lean: #print axioms allowlist
+    # lean: time each file while `lake build` elaborates it (no second elaboration); files the build
+    # does not elaborate (up to date, or outside its targets) are still checked one by one
+    time_in_build: bool = True
 
 
 @dataclass

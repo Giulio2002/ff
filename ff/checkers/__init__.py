@@ -2,10 +2,13 @@
 its time budget, with no forbidden construct?"""
 from __future__ import annotations
 
+import json
 import os
 import re
 import signal
 import subprocess
+import sys
+import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -164,17 +167,57 @@ class Lean(Base):
         return re.sub(r"--.*", "", text)
 
     def prepare(self, root: Path) -> CheckReport | None:
+        self.built: dict[str, FileResult] = {}
         n = max(1, len(self.files(root)))
-        code, out, secs, to = run_cmd(["lake", "build"], root, self.cfg.file_timeout_seconds * n + 600, self.nice)
+        with tempfile.TemporaryDirectory(prefix="ff-leanwrap-") as tmp:
+            env = self._timing_env(root, Path(tmp)) if self.cfg.time_in_build else None
+            code, out, secs, to = run_cmd(["lake", "build"], root, self.cfg.file_timeout_seconds * n + 600, self.nice,
+                                          env=env)
+            if env:
+                times = Path(env["FF_LEAN_TIMES"])
+                for line in (times.read_text().splitlines() if times.exists() else []):
+                    r = json.loads(line)
+                    self.built[r["file"]] = FileResult(r["file"], not self._bad(r["code"], r["timed_out"], r["output"]),
+                                                       r["seconds"], r["output"], r["timed_out"])
         if code != 0 or to:
-            return CheckReport(ok=False, files=[FileResult("lake build", False, secs, out, to)])
+            failed = [r for r in self.built.values() if not r.ok]
+            return CheckReport(ok=False, files=failed + [FileResult("lake build", False, secs, out, to)])
         return None
 
+    def _timing_env(self, root: Path, tmp: Path) -> dict[str, str] | None:
+        """A sysroot whose bin/lean is the timing wrapper (leanwrap.py), everything else the real toolchain."""
+        code, prefix, _, _ = run_cmd(["lean", "--print-prefix"], root, 60)
+        real = Path(prefix.strip().splitlines()[-1]) if code == 0 and prefix.strip() else None
+        if real is None or not (real / "bin" / "lean").exists():
+            return None
+        sysroot = tmp / "sysroot"
+        (sysroot / "bin").mkdir(parents=True)
+        for e in real.iterdir():
+            if e.name != "bin":
+                (sysroot / e.name).symlink_to(e)
+        for e in (real / "bin").iterdir():
+            if e.name != "lean":
+                (sysroot / "bin" / e.name).symlink_to(e)
+        wrap = sysroot / "bin" / "lean"
+        wrap.write_text(f"#!{sys.executable}\n" + (Path(__file__).parent / "leanwrap.py").read_text())
+        wrap.chmod(0o755)
+        (tmp / "slots").mkdir()
+        return {"LAKE_OVERRIDE_LEAN": "true", "LEAN_SYSROOT": str(sysroot), "FF_REAL_LEAN": str(real / "bin" / "lean"),
+                "FF_LEAN_TIMES": str(tmp / "times.jsonl"), "FF_LEAN_SLOTS": str(tmp / "slots"),
+                "FF_LEAN_JOBS": str(max(1, self.cfg.jobs)),
+                "FF_LEAN_TIMEOUT": str(self.cfg.file_timeout_seconds * (1.0 if self.cfg.enforce_file_budget else 10.0) + 5)}
+
+    @staticmethod
+    def _bad(code: int, timed_out: bool, out: str) -> bool:
+        return bool(code != 0 or timed_out or re.search(r"declaration uses 'sorry'|^.*error:", out, re.M))
+
     def check_file(self, root: Path, f: Path, timeout: float) -> FileResult:
+        done = getattr(self, "built", {}).get(str(f.resolve()))
+        if done is not None:
+            return FileResult(str(f), done.ok, done.seconds, done.output, done.timed_out)
         code, out, secs, to = run_cmd([self.cfg.binary, *self.cfg.args, str(f.relative_to(root))], root,
                                       timeout, self.nice)
-        bad = code != 0 or to or re.search(r"declaration uses 'sorry'|^.*error:", out, re.M)
-        return FileResult(str(f), not bad, secs, out, to)
+        return FileResult(str(f), not self._bad(code, to, out), secs, out, to)
 
     def extra(self, root: Path) -> list[str]:
         """#print axioms for every theorem of the checked files: only the allowlist may appear (no sorryAx)."""
