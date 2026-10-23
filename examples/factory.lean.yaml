@@ -35,6 +35,8 @@ spec:
 benchmark:
   command: python3 tools/bench.py --json         # prints the number the optimizer chases
   metric: '"decode_ns":\s*([0-9.]+)'
+  # score_file: docs/SCORE.md   # instead of metric: a Markdown file (read from main) whose one
+  #   ```python block defines score(result) over the last JSON object the command prints
   direction: lower
   min_improvement_pct: 2
   # target: 3.0                  # the goal: once main meets it the optimize loop stops experimenting

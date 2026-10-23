@@ -18,6 +18,7 @@ from ..checkers import run_cmd
 from ..gate import harness_env
 from ..git import git, is_ancestor, sha
 from ..quiet import timed_work, wait_quiet
+from .. import score
 
 if TYPE_CHECKING:
     from ..factory import Factory
@@ -440,8 +441,19 @@ class OptimizeLoop(Loop):
                 code, out, _, to = run_cmd(b.command, root, b.timeout_minutes * 60,
                                            0 if g.pause_agents else self.cfg.limits.nice,
                                            env=harness_env(self.f.spec_approved()))
+            if code != 0 or to:
+                self.log("bench-error", f"benchmark failed in {root.name}: {out[-400:]}")
+                return None
+            if b.score_file:
+                try:
+                    text = score.read_from(self.cfg.project.repo, self.cfg.project.main_branch, b.score_file)
+                    vals.append(score.score(text, out))
+                except Exception as e:          # noqa: BLE001 - a broken score file or output: no number
+                    self.log("bench-error", f"scoring by {b.score_file} failed in {root.name}: {e}; {out[-300:]}")
+                    return None
+                continue
             m = re.search(b.metric, out)
-            if code != 0 or to or not m:
+            if not m:
                 self.log("bench-error", f"benchmark failed in {root.name}: {out[-400:]}")
                 return None
             vals.append(float(m.group(1)))

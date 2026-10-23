@@ -142,6 +142,9 @@ class Reference:
 class Benchmark:
     command: str = ""
     metric: str = r"([0-9.]+)"     # regex; group 1 is the number
+    # or a Markdown file in the project (read from main) whose one ```python block defines
+    # score(result) -> float over the last JSON object the command prints; it replaces `metric`
+    score_file: str = ""
     direction: str = "lower"       # lower or higher is better
     min_improvement_pct: float = 1.0
     target: float | None = None    # the goal: once main meets it the optimize loop stops (and audit may start)

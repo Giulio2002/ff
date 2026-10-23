@@ -147,7 +147,8 @@ def build(cfg: Config, role: Role, task: str, *, worktree: str, branch: str, res
         unit_tests=cfg.commands.get("unit_tests", "(none)"),
         vectors=cfg.commands.get("vectors", "(none)"),
         runtime_tests=cfg.commands.get("runtime_tests", "(none)"),
-        benchmark=cfg.benchmark.command, known_limitations=cfg.audit.known_limitations_file,
+        benchmark=cfg.benchmark.command + (f"` scored as `{cfg.benchmark.score_file}"
+                                           if cfg.benchmark.score_file else ""), known_limitations=cfg.audit.known_limitations_file,
         references=_references(cfg, role),
         **(extra or {}))
     if role.subagents:

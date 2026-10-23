@@ -1061,3 +1061,28 @@ def test_a_run_stopped_at_restart_is_not_adopted_by_the_next_restart(tmp_path):
     assert stopped == ["optimizer-x"] and not adopted
     assert f.store.flag("cycle-open:optimizer-x") is None
     assert f.reconcile({"optimize": object()}) == ([], []), "a stopped run's cycle is over"
+
+
+def test_a_score_file_on_main_scores_the_benchmark(tmp_path):
+    repo = make_project(tmp_path, bug=False)
+    (repo / "SCORE.md").write_text("# Score\n\nThe worst vector.\n\n```python\n"
+                                   "def score(result):\n    return max(result['vectors'].values())\n```\n")
+    (repo / "bench.sh").write_text("echo noise\necho '{\"vectors\": {\"a\": 0.5, \"b\": 1.75}}'\n")
+    git(repo, "add", "-A")
+    git(repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "score")
+    p = write_config(tmp_path, repo)
+    import yaml
+    c = yaml.safe_load(p.read_text())
+    c["benchmark"] = {"command": "sh bench.sh", "score_file": "SCORE.md", "repeats": 1, "target": 1}
+    c["roles"]["optimizer"] = {"provider": "fake"}
+    p.write_text(yaml.safe_dump(c))
+    f = Factory.from_path(p)
+    from ff.loops import OptimizeLoop
+    opt = OptimizeLoop(f)
+    assert opt.measure(repo) == 1.75
+    # the tree being measured cannot rescore itself: the file is read from main
+    (repo / "SCORE.md").write_text("```python\ndef score(result):\n    return 0\n```\n")
+    assert opt.measure(repo) == 1.75
+    (repo / "bench.sh").write_text("echo no json\n")
+    assert opt.measure(repo) is None
+    assert any(e["kind"] == "bench-error" and "SCORE.md" in e["message"] for e in f.store.events())
