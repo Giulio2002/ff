@@ -463,13 +463,27 @@ class OptimizeLoop(Loop):
         main = sha(self.cfg.project.repo, self.cfg.project.main_branch)
         key = f"baseline:{main}"
         cached = self.store.flag(key)
-        if cached:
+        if cached and self.baseline_fresh(main):
             return float(cached)
         with self.f.main_view("bench") as view:
             v = self.measure(view)
         if v is not None:
-            self.store.set_flag(key, str(v))
+            self.set_baseline(main, v)
         return v
+
+    def set_baseline(self, main: str, value: float) -> None:
+        self.store.set_flag(f"baseline:{main}", str(value))
+        self.store.set_flag(f"baseline-at:{main}", str(time.time()))
+
+    def baseline_fresh(self, main: str) -> bool:
+        """A main baseline is measured again once it is older than benchmark.baseline_max_age_hours (the
+        machine's load drifts, so an old number makes every candidate look slower or faster than it is);
+        one with no time recorded counts as old. 0 keeps a baseline for as long as main is unchanged."""
+        age = self.cfg.benchmark.baseline_max_age_hours
+        if age <= 0:
+            return True
+        at = self.store.flag(f"baseline-at:{main}")
+        return at is not None and time.time() - float(at) <= age * 3600
 
     def reuse_measurement(self, measured: str, value: float) -> None:
         """The kept candidate was benchmarked at commit `measured`. If main is that same code (the gate
@@ -477,7 +491,7 @@ class OptimizeLoop(Loop):
         repo, main = self.cfg.project.repo, sha(self.cfg.project.repo, self.cfg.project.main_branch)
         same = subprocess.run(["git", "diff", "--quiet", measured, main], cwd=repo).returncode == 0
         if same:
-            self.store.set_flag(f"baseline:{main}", str(value))
+            self.set_baseline(main, value)
 
     def at_target(self, value: float) -> bool:
         t = self.cfg.benchmark.target

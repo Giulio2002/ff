@@ -155,6 +155,8 @@ class Benchmark:
     versus: str = ""               # what the number is measured against, for people: "geth v1.17.8"
     repeats: int = 3
     timeout_minutes: float = 30
+    # main's baseline is measured again once older than this (load drifts); 0 keeps it while main is unchanged
+    baseline_max_age_hours: float = 4
     references: list[Reference] = field(default_factory=list)
 
 

@@ -41,6 +41,7 @@ benchmark:
   min_improvement_pct: 2
   # target: 3.0                  # the goal: once main meets it the optimize loop stops experimenting
   repeats: 3
+  # baseline_max_age_hours: 4   # main's number is measured again once older (load drifts); 0 = keep
   # The fastest baseline the benchmark compares against. The optimizer is told to study how it gets
   # its speed and port the ideas (proved). `ff references` fetches and lists them.
   references:

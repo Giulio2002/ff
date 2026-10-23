@@ -1017,6 +1017,32 @@ def test_a_kept_experiment_s_measurement_is_main_s_baseline(tmp_path):
     assert f.store.flag("baseline:" + git(repo, "rev-parse", "main")) is None, "different code is measured again"
 
 
+def test_an_old_main_baseline_is_measured_again(tmp_path):
+    repo = make_project(tmp_path, bug=False)
+    p = write_config(tmp_path, repo)
+    import yaml
+    c = yaml.safe_load(p.read_text())
+    c["benchmark"] = {"command": "echo 7", "repeats": 1, "baseline_max_age_hours": 1}
+    c["roles"]["optimizer"] = {"provider": "fake"}
+    c["loops"]["optimize"] = {"enabled": True}
+    c["gate"] = {**c.get("gate", {}), "quiet_cpu_pct": 0}
+    p.write_text(yaml.safe_dump(c))
+    f = Factory.from_path(p)
+    from ff.loops import OptimizeLoop
+    opt = OptimizeLoop(f)
+    main = git(repo, "rev-parse", "main")
+    opt.reuse_measurement(main, 2.5)
+    assert opt.baseline() == 2.5, "a fresh baseline is reused"
+    f.store.set_flag(f"baseline-at:{main}", str(time.time() - 2 * 3600))
+    assert opt.baseline() == 7.0, "an old one is measured again"
+    f.store.set_flag(f"baseline-at:{main}", None)
+    f.store.set_flag(f"baseline:{main}", "3.0")
+    assert opt.baseline() == 7.0, "one with no time recorded counts as old"
+    f.cfg.benchmark.baseline_max_age_hours = 0
+    f.store.set_flag(f"baseline:{main}", "3.0")
+    assert opt.baseline() == 3.0, "0 keeps it"
+
+
 def test_adopted_cycles_never_add_workers_beyond_the_configuration(tmp_path):
     repo = make_project(tmp_path, bug=False)
     p = write_config(tmp_path, repo)
